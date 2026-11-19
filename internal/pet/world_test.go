@@ -304,6 +304,36 @@ func TestWindowZOrderOcclusion(t *testing.T) {
 	}
 }
 
+func TestStackedPetAutoHopsOff(t *testing.T) {
+	bank, err := LoadSpriteBank()
+	if err != nil {
+		t.Fatalf("LoadSpriteBank failed: %v", err)
+	}
+	screen := image.Rect(0, 0, 1280, 720)
+	workArea := image.Rect(0, 0, 1280, 672)
+	w := NewWorld(bank, workArea, screen, 1.0)
+	w.Pets = nil
+	w.introSpawnDone = true
+	w.FreeRoam = true
+
+	manggom := w.newPet("manggom", 900, float64(workArea.Max.Y))
+	tanjiro := w.newPet("tanjiro", 900, float64(workArea.Max.Y)-100)
+	w.Pets = append(w.Pets, manggom, tanjiro)
+	w.attachStack(tanjiro, manggom)
+	tanjiro.StateTimer = 0.25 // speed up wait for test
+
+	// Step through timer expiry -> jump prep -> jump arc -> fall -> land on taskbar cleanly!
+	for i := 0; i < 120; i++ {
+		w.Step(1.0 / 40.0)
+	}
+	if tanjiro.StackParentID != 0 {
+		t.Fatalf("expected Tanjiro to hop off Mang-gom's head automatically, still stacked")
+	}
+	if tanjiro.State != StateIdle && tanjiro.State != StateWalk {
+		t.Fatalf("expected Tanjiro landed safely after hopping off, got state=%v", tanjiro.State)
+	}
+}
+
 func saveMockup(t *testing.T, w *World, filename string) {
 	t.Helper()
 	outDir := os.Getenv("PET_PREVIEW_DIR")

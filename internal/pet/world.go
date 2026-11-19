@@ -104,8 +104,10 @@ type Pet struct {
 	MantleTopY    float64
 	MantleT       float64
 	JumpDirX      float64 // -1 or +1 launch direction
-	IgnoreWinID   uintptr // briefly ignore the window just jumped off
-	IgnoreWinTime float64
+	IgnoreWinID     uintptr // briefly ignore the window just jumped off
+	IgnoreWinTime   float64
+	IgnoreStackID   int // briefly ignore the pet whose head we just hopped off
+	IgnoreStackTime float64
 
 	// Propeller claw state (used for StateClawSpawn & StateClawDismiss)
 	ClawY        float64
@@ -946,7 +948,7 @@ func (w *World) findStackTarget(p *Pet, generous bool) *Pet {
 	var best *Pet
 	bestDist := 1e9
 	for _, other := range w.Pets {
-		if other.ID == p.ID {
+		if other.ID == p.ID || (p.IgnoreStackTime > 0 && other.ID == p.IgnoreStackID) {
 			continue
 		}
 		if !isStackableHost(other) {
@@ -978,6 +980,7 @@ func (w *World) findStackTarget(p *Pet, generous bool) *Pet {
 func (w *World) attachStack(p, host *Pet) {
 	p.StackParentID = host.ID
 	p.State = StateStacked
+	p.StateTimer = 7.0 + w.rng.Float64()*8.0 // stay perched for 7~15s, then hop off naturally if FreeRoam is ON!
 	p.X = host.X
 	p.Y = w.HeadTopY(host)
 	p.VX = 0
@@ -1064,6 +1067,13 @@ func (w *World) Step(dt float64) {
 			if p.IgnoreWinTime <= 0 {
 				p.IgnoreWinTime = 0
 				p.IgnoreWinID = 0
+			}
+		}
+		if p.IgnoreStackTime > 0 {
+			p.IgnoreStackTime -= dt
+			if p.IgnoreStackTime <= 0 {
+				p.IgnoreStackTime = 0
+				p.IgnoreStackID = 0
 			}
 		}
 		w.stepRubbing(p, dt)
@@ -1190,6 +1200,23 @@ func (w *World) Step(dt float64) {
 				p.Tilt = parent.Tilt * 0.65
 			} else {
 				p.Tilt *= math.Max(0, 1-dt*5)
+			}
+			// Naturally hop off a friend's head after resting for a while (when FreeRoam is ON & top of stack)
+			if w.FreeRoam && !w.hasStackChild(p.ID) && p.ReactTimer <= 0 && p.RubActiveTimer <= 0 {
+				p.StateTimer -= dt
+				if p.StateTimer <= 0 {
+					dir := 1.0
+					if p.X > float64(w.WorkArea.Min.X+w.WorkArea.Max.X)*0.5 {
+						dir = -1.0 // jump toward the open center of the screen!
+					}
+					if w.rng.Float64() < 0.3 {
+						dir = -dir
+					}
+					p.IgnoreStackID = parent.ID
+					p.IgnoreStackTime = 0.85
+					p.StackParentID = 0
+					w.startJumpPrep(p, dir)
+				}
 			}
 		}
 
