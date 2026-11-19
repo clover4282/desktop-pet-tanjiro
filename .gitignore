@@ -1,6 +1,6 @@
 .DS_Store
 *.log
 *.tmp
-chibipet
-spriteproc
-mkicon
+/chibipet
+/spriteproc
+/mkicon
