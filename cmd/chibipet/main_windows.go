@@ -23,6 +23,7 @@ const (
 	cmdSpawnAll    = 2101
 	cmdPetReact    = 2200
 	cmdPetDismiss  = 2201
+	cmdScale50     = 2304
 	cmdScale85     = 2300
 	cmdScale100    = 2301
 	cmdScale125    = 2302
@@ -328,6 +329,7 @@ func (a *desktopApp) showContextMenu(screenX, screenY int32, targetPetID int) {
 			}
 			return mfString
 		}
+		procAppendMenuW.Call(hScale, scaleFlags(0.50), cmdScale50, uintptr(unsafe.Pointer(utf16Ptr("아주 작게 (50%)"))))
 		procAppendMenuW.Call(hScale, scaleFlags(0.85), cmdScale85, uintptr(unsafe.Pointer(utf16Ptr("작게 (85%)"))))
 		procAppendMenuW.Call(hScale, scaleFlags(1.00), cmdScale100, uintptr(unsafe.Pointer(utf16Ptr("보통 (100%)"))))
 		procAppendMenuW.Call(hScale, scaleFlags(1.25), cmdScale125, uintptr(unsafe.Pointer(utf16Ptr("크게 (125%)"))))
@@ -401,6 +403,8 @@ func (a *desktopApp) handleCommand(cmd int, targetPetID int) {
 		if targetPetID != 0 {
 			a.world.DismissPet(targetPetID)
 		}
+	case cmdScale50:
+		a.world.Scale = 0.50
 	case cmdScale85:
 		a.world.Scale = 0.85
 	case cmdScale100:

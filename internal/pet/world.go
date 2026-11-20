@@ -132,7 +132,7 @@ type World struct {
 	Screen   image.Rectangle // Full monitor rect (for bounds clipping)
 
 	BaseSize    float64 // Logical sprite size in pixels (e.g. 132 * dpiScale)
-	Scale       float64 // User scale multiplier (0.85, 1.0, 1.25, 1.5)
+	Scale       float64 // User scale multiplier (0.5, 0.85, 1.0, 1.25, 1.5)
 	FreeRoam    bool
 	WindowClimb bool
 	TopMost     bool
