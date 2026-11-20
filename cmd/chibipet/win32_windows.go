@@ -5,6 +5,7 @@ package main
 import (
 	"image"
 	"math"
+	"os"
 	"syscall"
 	"unsafe"
 
@@ -17,6 +18,7 @@ var (
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
 	shell32  = syscall.NewLazyDLL("shell32.dll")
 	dwmapi   = syscall.NewLazyDLL("dwmapi.dll")
+	advapi32 = syscall.NewLazyDLL("advapi32.dll")
 
 	procSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
 	procSetProcessDPIAware            = user32.NewProc("SetProcessDPIAware")
@@ -73,6 +75,13 @@ var (
 	procCloseHandle      = kernel32.NewProc("CloseHandle")
 
 	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
+
+	procRegCreateKeyExW  = advapi32.NewProc("RegCreateKeyExW")
+	procRegOpenKeyExW    = advapi32.NewProc("RegOpenKeyExW")
+	procRegQueryValueExW = advapi32.NewProc("RegQueryValueExW")
+	procRegSetValueExW   = advapi32.NewProc("RegSetValueExW")
+	procRegDeleteValueW  = advapi32.NewProc("RegDeleteValueW")
+	procRegCloseKey      = advapi32.NewProc("RegCloseKey")
 )
 
 const (
@@ -147,6 +156,18 @@ const (
 	errorAlreadyExists = 183
 
 	dpiAwarenessPerMonitorAwareV2 = ^uintptr(3) // (DPI_AWARENESS_CONTEXT)-4
+
+	hkeyCurrentUser   = uintptr(0x80000001)
+	keyQueryValue     = 0x0001
+	keySetValue       = 0x0002
+	regSZ             = 1
+	regDWORD          = 4
+	errorFileNotFound = 2
+
+	autoStartRunSubKey  = `Software\Microsoft\Windows\CurrentVersion\Run`
+	autoStartPrefSubKey = `Software\DesktopPetTanjiro`
+	autoStartRunName    = "DesktopPetTanjiro"
+	autoStartPrefName   = "AutoStart"
 )
 
 type point struct {
@@ -613,4 +634,147 @@ func enumWindowsProc(hwnd, _ uintptr) uintptr {
 		return 0
 	}
 	return 1
+}
+
+func readAutoStartPref() (enabled, exists bool) {
+	var hKey uintptr
+	r, _, _ := procRegOpenKeyExW.Call(
+		hkeyCurrentUser,
+		uintptr(unsafe.Pointer(utf16Ptr(autoStartPrefSubKey))),
+		0,
+		keyQueryValue,
+		uintptr(unsafe.Pointer(&hKey)),
+	)
+	if r != 0 {
+		return false, false
+	}
+	defer procRegCloseKey.Call(hKey)
+
+	var valType, val uint32
+	valSize := uint32(4)
+	r, _, _ = procRegQueryValueExW.Call(
+		hKey,
+		uintptr(unsafe.Pointer(utf16Ptr(autoStartPrefName))),
+		0,
+		uintptr(unsafe.Pointer(&valType)),
+		uintptr(unsafe.Pointer(&val)),
+		uintptr(unsafe.Pointer(&valSize)),
+	)
+	if r == 0 && valType == regDWORD && valSize == 4 {
+		return val != 0, true
+	}
+	return false, false
+}
+
+func writeAutoStartPref(enabled bool) bool {
+	var hKey uintptr
+	r, _, _ := procRegCreateKeyExW.Call(
+		hkeyCurrentUser,
+		uintptr(unsafe.Pointer(utf16Ptr(autoStartPrefSubKey))),
+		0, 0, 0,
+		keySetValue,
+		0,
+		uintptr(unsafe.Pointer(&hKey)),
+		0,
+	)
+	if r != 0 {
+		return false
+	}
+	defer procRegCloseKey.Call(hKey)
+
+	var v uint32
+	if enabled {
+		v = 1
+	}
+	r, _, _ = procRegSetValueExW.Call(
+		hKey,
+		uintptr(unsafe.Pointer(utf16Ptr(autoStartPrefName))),
+		0,
+		regDWORD,
+		uintptr(unsafe.Pointer(&v)),
+		4,
+	)
+	return r == 0
+}
+
+func setRunKeyAutoStart(enabled bool) bool {
+	if enabled {
+		exePath, err := os.Executable()
+		if err != nil || exePath == "" {
+			return false
+		}
+		u16, err := syscall.UTF16FromString(`"` + exePath + `"`)
+		if err != nil || len(u16) == 0 {
+			return false
+		}
+		var hKey uintptr
+		r, _, _ := procRegCreateKeyExW.Call(
+			hkeyCurrentUser,
+			uintptr(unsafe.Pointer(utf16Ptr(autoStartRunSubKey))),
+			0, 0, 0,
+			keySetValue,
+			0,
+			uintptr(unsafe.Pointer(&hKey)),
+			0,
+		)
+		if r != 0 {
+			return false
+		}
+		defer procRegCloseKey.Call(hKey)
+
+		r, _, _ = procRegSetValueExW.Call(
+			hKey,
+			uintptr(unsafe.Pointer(utf16Ptr(autoStartRunName))),
+			0,
+			regSZ,
+			uintptr(unsafe.Pointer(&u16[0])),
+			uintptr(len(u16)*2),
+		)
+		return r == 0
+	}
+
+	var hKey uintptr
+	r, _, _ := procRegOpenKeyExW.Call(
+		hkeyCurrentUser,
+		uintptr(unsafe.Pointer(utf16Ptr(autoStartRunSubKey))),
+		0,
+		keySetValue,
+		uintptr(unsafe.Pointer(&hKey)),
+	)
+	if r == errorFileNotFound {
+		return true
+	}
+	if r != 0 {
+		return false
+	}
+	defer procRegCloseKey.Call(hKey)
+
+	r, _, _ = procRegDeleteValueW.Call(
+		hKey,
+		uintptr(unsafe.Pointer(utf16Ptr(autoStartRunName))),
+	)
+	return r == 0 || r == errorFileNotFound
+}
+
+// initAutoStart syncs the HKCU Run entry on startup, defaulting to enabled on first launch
+// while respecting any explicit user opt-out stored in HKCU\Software\DesktopPetTanjiro\AutoStart.
+func initAutoStart() bool {
+	enabled, exists := readAutoStartPref()
+	if !exists {
+		enabled = true
+		writeAutoStartPref(true)
+	}
+	if enabled {
+		return setRunKeyAutoStart(true)
+	}
+	setRunKeyAutoStart(false)
+	return false
+}
+
+func setAutoStart(enabled bool) bool {
+	if !setRunKeyAutoStart(enabled) {
+		return false
+	}
+	writeAutoStartPref(enabled)
+	return true
 }

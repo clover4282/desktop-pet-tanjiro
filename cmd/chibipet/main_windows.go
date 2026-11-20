@@ -18,23 +18,24 @@ const (
 	trayIconID  = 1001
 
 	// Menu command IDs
-	cmdSpawnBase   = 2000 // + index in pet.Catalog
-	cmdSpawnRandom = 2100
-	cmdSpawnAll    = 2101
-	cmdPetReact    = 2200
-	cmdPetDismiss  = 2201
-	cmdScale50     = 2304
-	cmdScale85     = 2300
-	cmdScale100    = 2301
-	cmdScale125    = 2302
-	cmdScale150    = 2303
-	cmdToggleRoam  = 2400
-	cmdToggleClimb = 2401
-	cmdToggleTop   = 2402
-	cmdUnstackAll  = 2500
-	cmdReplayIntro = 2501
-	cmdClearAll    = 2502
-	cmdExit        = 2999
+	cmdSpawnBase       = 2000 // + index in pet.Catalog
+	cmdSpawnRandom     = 2100
+	cmdSpawnAll        = 2101
+	cmdPetReact        = 2200
+	cmdPetDismiss      = 2201
+	cmdScale50         = 2304
+	cmdScale85         = 2300
+	cmdScale100        = 2301
+	cmdScale125        = 2302
+	cmdScale150        = 2303
+	cmdToggleRoam      = 2400
+	cmdToggleClimb     = 2401
+	cmdToggleTop       = 2402
+	cmdToggleAutoStart = 2403
+	cmdUnstackAll      = 2500
+	cmdReplayIntro     = 2501
+	cmdClearAll        = 2502
+	cmdExit            = 2999
 )
 
 type desktopApp struct {
@@ -52,6 +53,7 @@ type desktopApp struct {
 	mouseCaptured  bool
 	visible        bool
 	inMenu         bool
+	autoStart      bool
 }
 
 var app *desktopApp
@@ -117,6 +119,7 @@ func main() {
 		surface:          newDIBSurface(),
 		lastTick:         time.Now(),
 		visible:          true,
+		autoStart:        initAutoStart(),
 	}
 
 	cleanupStartup := func() {
@@ -357,6 +360,12 @@ func (a *desktopApp) showContextMenu(screenX, screenY int32, targetPetID int) {
 	}
 	procAppendMenuW.Call(hMenu, topFlag, cmdToggleTop, uintptr(unsafe.Pointer(utf16Ptr("항상 위(작업표시줄 위) 유지"))))
 
+	autoStartFlag := uintptr(mfString)
+	if a.autoStart {
+		autoStartFlag |= mfChecked
+	}
+	procAppendMenuW.Call(hMenu, autoStartFlag, cmdToggleAutoStart, uintptr(unsafe.Pointer(utf16Ptr("Windows 시작 시 자동 실행"))))
+
 	procAppendMenuW.Call(hMenu, mfSeparator, 0, 0)
 	procAppendMenuW.Call(hMenu, mfString, cmdUnstackAll, uintptr(unsafe.Pointer(utf16Ptr("쌓인 캐릭터 모두 내리기"))))
 	procAppendMenuW.Call(hMenu, mfString, cmdReplayIntro, uintptr(unsafe.Pointer(utf16Ptr("오프닝 다시 보기 (망곰 + 탄지로)"))))
@@ -420,6 +429,11 @@ func (a *desktopApp) handleCommand(cmd int, targetPetID int) {
 	case cmdToggleTop:
 		a.world.TopMost = !a.world.TopMost
 		a.applyTopMost()
+	case cmdToggleAutoStart:
+		next := !a.autoStart
+		if setAutoStart(next) {
+			a.autoStart = next
+		}
 	case cmdUnstackAll:
 		a.world.UnstackAll()
 	case cmdReplayIntro:
