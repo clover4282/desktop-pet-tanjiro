@@ -91,16 +91,16 @@ func (w *World) HitTest(screenX, screenY float64) int {
 		lx := dx*cosA - dy*sinA
 		ly := dx*sinA + dy*cosA
 
-		sw := float64(sprite.Bounds().Dx())
-		sh := float64(sprite.Bounds().Dy())
+		sw := float64(sprite.W)
+		sh := float64(sprite.H)
 		u := lx/scaleX + sw*0.5
 		if p.FacingLeft {
 			u = sw - u
 		}
 		v := ly/scaleY + sh
 		ix, iy := int(math.Floor(u)), int(math.Floor(v))
-		if ix >= 0 && ix < int(sw) && iy >= 0 && iy < int(sh) {
-			if sprite.NRGBAAt(ix, iy).A > 20 {
+		if ix >= 0 && ix < sprite.W && iy >= 0 && iy < sprite.H {
+			if sprite.Pix[iy*sprite.Stride+ix*4+3] > 20 {
 				return p.ID
 			}
 		}
@@ -108,7 +108,7 @@ func (w *World) HitTest(screenX, screenY float64) int {
 	return 0
 }
 
-func (w *World) petDrawParams(p *Pet) (sprite *image.NRGBA, scaleX, scaleY, drawX, drawY, angle float64) {
+func (w *World) petDrawParams(p *Pet) (sprite *PremulSprite, scaleX, scaleY, drawX, drawY, angle float64) {
 	ss := w.Bank.ByID[p.CharID]
 	if ss == nil {
 		return nil, 1, 1, p.X, p.Y, 0
@@ -187,8 +187,8 @@ func (w *World) petDrawParams(p *Pet) (sprite *image.NRGBA, scaleX, scaleY, draw
 		pose = PoseReact
 		extraScale = ss.Def.ReactScale
 	}
-	sprite = ss.Poses[pose]
-	sw := float64(sprite.Bounds().Dx())
+	sprite = ss.Premul[pose]
+	sw := float64(sprite.W)
 	baseScale := (w.PetSize() / sw) * extraScale
 
 	// Gentle idle breathing + squash/stretch + character-specific rubbing bounce
@@ -214,9 +214,6 @@ func (w *World) petDrawParams(p *Pet) (sprite *image.NRGBA, scaleX, scaleY, draw
 		// Parabolic step lift synchronized directly with distance-based WalkPhase!
 		stepSin := math.Abs(math.Sin(p.WalkPhase))
 		hopY = math.Pow(stepSin, 0.85) * gait.hop * w.Scale * speedFrac
-	} else if p.RubActiveTimer > 0 && p.CharID == "usagi" {
-		// Usagi bounces hyper-excitedly while being rubbed!
-		hopY = math.Abs(math.Sin(p.AnimTime*14.0)) * 11.0 * w.Scale * (0.4 + p.RubMeter)
 	} else if p.RubActiveTimer > 0 && (p.CharID == "kyojuro" || p.CharID == "inosuke") {
 		hopY = math.Abs(math.Sin(p.AnimTime*10.0)) * 6.0 * w.Scale
 	} else if p.ReactTimer > 0 {
@@ -330,14 +327,114 @@ func drawGroundShadowBGRA(dst []byte, stride, dw, dh int, p *Pet, petSize, ox, o
 	}
 }
 
-// blitSpriteBGRA blits an NRGBA sprite onto a premultiplied BGRA buffer with bilinear filtering,
+// blitSpriteBGRA blits a premultiplied BGRA sprite onto a premultiplied BGRA buffer with bilinear filtering,
 // pivot at bottom-center (px, py).
-func blitSpriteBGRA(dst []byte, stride, dw, dh int, src *image.NRGBA, px, py, scaleX, scaleY, angle float64, flipX bool) {
-	sw := src.Bounds().Dx()
-	sh := src.Bounds().Dy()
+func blitSpriteBGRA(dst []byte, stride, dw, dh int, src *PremulSprite, px, py, scaleX, scaleY, angle float64, flipX bool) {
+	sw, sh := src.W, src.H
 	fsw, fsh := float64(sw), float64(sh)
+	invScaleX := 1.0 / scaleX
+	invScaleY := 1.0 / scaleY
+	srcPix := src.Pix
+	srcStride := src.Stride
 
-	// Compute transformed bounding box of the 4 sprite corners
+	// Upright fast-path (most idle/standing/stacked frames have angle == 0):
+	// avoids trig/rotation math and hoists Y-axis bilinear weights out of the inner X loop.
+	if math.Abs(angle) < 1e-4 {
+		halfW := fsw * 0.5 * scaleX
+		x0 := maxI(0, int(math.Floor(px-halfW))-1)
+		y0 := maxI(0, int(math.Floor(py-fsh*scaleY))-1)
+		x1 := minI(dw-1, int(math.Ceil(px+halfW))+1)
+		y1 := minI(dh-1, int(math.Ceil(py))+1)
+
+		for y := y0; y <= y1; y++ {
+			v := (float64(y)+0.5-py)*invScaleY + fsh - 0.5
+			if v < -0.5 || v > fsh-0.5 {
+				continue
+			}
+			iy := int(math.Floor(v))
+			fy := v - float64(iy)
+			wy0 := 1.0 - fy
+			wy1 := fy
+			y0Valid := iy >= 0 && iy < sh
+			y1Valid := iy+1 >= 0 && iy+1 < sh
+			sRow0 := iy * srcStride
+			sRow1 := (iy + 1) * srcStride
+			rowOff := y * stride
+
+			for x := x0; x <= x1; x++ {
+				u := (float64(x)+0.5-px)*invScaleX + fsw*0.5 - 0.5
+				if flipX {
+					u = fsw - 1.0 - u
+				}
+				if u < -0.5 || u > fsw-0.5 {
+					continue
+				}
+				ix := int(math.Floor(u))
+				fx := u - float64(ix)
+				wx0 := 1.0 - fx
+				wx1 := fx
+
+				var pb, pg, pr, pa float64
+				if y0Valid {
+					if ix >= 0 && ix < sw {
+						si := sRow0 + ix*4
+						if srcPix[si+3] != 0 {
+							wt := wx0 * wy0
+							pb += float64(srcPix[si+0]) * wt
+							pg += float64(srcPix[si+1]) * wt
+							pr += float64(srcPix[si+2]) * wt
+							pa += float64(srcPix[si+3]) * wt
+						}
+					}
+					if ix+1 >= 0 && ix+1 < sw {
+						si := sRow0 + (ix+1)*4
+						if srcPix[si+3] != 0 {
+							wt := wx1 * wy0
+							pb += float64(srcPix[si+0]) * wt
+							pg += float64(srcPix[si+1]) * wt
+							pr += float64(srcPix[si+2]) * wt
+							pa += float64(srcPix[si+3]) * wt
+						}
+					}
+				}
+				if y1Valid {
+					if ix >= 0 && ix < sw {
+						si := sRow1 + ix*4
+						if srcPix[si+3] != 0 {
+							wt := wx0 * wy1
+							pb += float64(srcPix[si+0]) * wt
+							pg += float64(srcPix[si+1]) * wt
+							pr += float64(srcPix[si+2]) * wt
+							pa += float64(srcPix[si+3]) * wt
+						}
+					}
+					if ix+1 >= 0 && ix+1 < sw {
+						si := sRow1 + (ix+1)*4
+						if srcPix[si+3] != 0 {
+							wt := wx1 * wy1
+							pb += float64(srcPix[si+0]) * wt
+							pg += float64(srcPix[si+1]) * wt
+							pr += float64(srcPix[si+2]) * wt
+							pa += float64(srcPix[si+3]) * wt
+						}
+					}
+				}
+				if pa < 0.5 {
+					continue
+				}
+
+				di := rowOff + x*4
+				invA := 1.0 - pa/255.0
+				dst[di+0] = clampByte(pb + float64(dst[di+0])*invA)
+				dst[di+1] = clampByte(pg + float64(dst[di+1])*invA)
+				dst[di+2] = clampByte(pr + float64(dst[di+2])*invA)
+				dst[di+3] = clampByte(pa + float64(dst[di+3])*invA)
+			}
+		}
+		return
+	}
+
+	// General rotated path
 	cosA := math.Cos(angle)
 	sinA := math.Sin(angle)
 	corners := [4][2]float64{
@@ -370,19 +467,16 @@ func blitSpriteBGRA(dst []byte, stride, dw, dh int, src *image.NRGBA, px, py, sc
 	x1 := minI(dw-1, int(math.Ceil(maxX))+1)
 	y1 := minI(dh-1, int(math.Ceil(maxY))+1)
 
-	invScaleX := 1.0 / scaleX
-	invScaleY := 1.0 / scaleY
-	srcPix := src.Pix
-	srcStride := src.Stride
-
 	for y := y0; y <= y1; y++ {
 		dy := float64(y) + 0.5 - py
+		dySin := dy * sinA
+		dyCos := dy * cosA
 		rowOff := y * stride
 		for x := x0; x <= x1; x++ {
 			dx := float64(x) + 0.5 - px
 			// Inverse rotate
-			lx := dx*cosA + dy*sinA
-			ly := -dx*sinA + dy*cosA
+			lx := dx*cosA + dySin
+			ly := -dx*sinA + dyCos
 
 			u := lx*invScaleX + fsw*0.5 - 0.5
 			if flipX {
@@ -393,13 +487,13 @@ func blitSpriteBGRA(dst []byte, stride, dw, dh int, src *image.NRGBA, px, py, sc
 				continue
 			}
 
-			// Bilinear sample in premultiplied space (prevents dark fringes!)
+			// Bilinear sample in premultiplied BGRA space
 			ix := int(math.Floor(u))
 			iy := int(math.Floor(v))
 			fx := u - float64(ix)
 			fy := v - float64(iy)
 
-			var pr, pg, pb, pa float64
+			var pb, pg, pr, pa float64
 			for oy := 0; oy <= 1; oy++ {
 				sy := iy + oy
 				if sy < 0 || sy >= sh {
@@ -419,17 +513,15 @@ func blitSpriteBGRA(dst []byte, stride, dw, dh int, src *image.NRGBA, px, py, sc
 					if ox == 1 {
 						wx = fx
 					}
-					wt := wx * wy
 					si := sRow + sx*4
-					a := float64(srcPix[si+3])
-					if a == 0 {
+					if srcPix[si+3] == 0 {
 						continue
 					}
-					af := a / 255.0
-					pr += float64(srcPix[si+0]) * af * wt
-					pg += float64(srcPix[si+1]) * af * wt
-					pb += float64(srcPix[si+2]) * af * wt
-					pa += a * wt
+					wt := wx * wy
+					pb += float64(srcPix[si+0]) * wt
+					pg += float64(srcPix[si+1]) * wt
+					pr += float64(srcPix[si+2]) * wt
+					pa += float64(srcPix[si+3]) * wt
 				}
 			}
 			if pa < 0.5 {
@@ -438,16 +530,11 @@ func blitSpriteBGRA(dst []byte, stride, dw, dh int, src *image.NRGBA, px, py, sc
 
 			// Porter-Duff source-over onto premultiplied BGRA
 			di := rowOff + x*4
-			srcA := pa / 255.0
-			invA := 1.0 - srcA
-			outB := pb + float64(dst[di+0])*invA
-			outG := pg + float64(dst[di+1])*invA
-			outR := pr + float64(dst[di+2])*invA
-			outA := pa + float64(dst[di+3])*invA
-			dst[di+0] = clampByte(outB)
-			dst[di+1] = clampByte(outG)
-			dst[di+2] = clampByte(outR)
-			dst[di+3] = clampByte(outA)
+			invA := 1.0 - pa/255.0
+			dst[di+0] = clampByte(pb + float64(dst[di+0])*invA)
+			dst[di+1] = clampByte(pg + float64(dst[di+1])*invA)
+			dst[di+2] = clampByte(pr + float64(dst[di+2])*invA)
+			dst[di+3] = clampByte(pa + float64(dst[di+3])*invA)
 		}
 	}
 }
@@ -601,7 +688,7 @@ func drawRubAuraBGRA(dst []byte, stride, dw, dh int, p *Pet, petSize, ox, oy flo
 		} else {
 			col = color.NRGBA{105, 225, 255, clampByte(135 * strength)}
 		}
-	case "chiikawa", "manggom":
+	case "manggom":
 		col = color.NRGBA{255, 165, 195, clampByte(110 * strength)}
 	default:
 		col = color.NRGBA{255, 220, 105, clampByte(115 * strength)}

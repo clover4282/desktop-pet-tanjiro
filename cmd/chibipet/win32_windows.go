@@ -70,6 +70,7 @@ var (
 
 	procGetModuleHandleW = kernel32.NewProc("GetModuleHandleW")
 	procCreateMutexW     = kernel32.NewProc("CreateMutexW")
+	procCloseHandle      = kernel32.NewProc("CloseHandle")
 
 	procShellNotifyIconW = shell32.NewProc("Shell_NotifyIconW")
 )
@@ -300,12 +301,13 @@ func getCursorPos() (int32, int32) {
 
 // dibSurface holds a reusable top-down 32-bit premultiplied BGRA DIBSection for UpdateLayeredWindow.
 type dibSurface struct {
-	memDC  uintptr
-	hBmp   uintptr
-	oldBmp uintptr
-	bits   unsafe.Pointer
-	w, h   int
-	buf    []byte
+	memDC       uintptr
+	hBmp        uintptr
+	oldBmp      uintptr
+	bits        unsafe.Pointer
+	w, h        int
+	buf         []byte
+	shrinkTicks int
 }
 
 func newDIBSurface() *dibSurface {
@@ -318,16 +320,32 @@ func (s *dibSurface) ensureSize(needW, needH int) bool {
 		return false
 	}
 	if s.hBmp != 0 && s.w >= needW && s.h >= needH {
-		return true
+		// Reclaim oversized DIB memory if the active bounds stay much smaller for ~3 seconds (120 frames at 40 FPS).
+		curArea := s.w * s.h
+		needArea := needW * needH
+		if curArea > 384*384 && needArea*3 < curArea {
+			s.shrinkTicks++
+			if s.shrinkTicks < 120 {
+				return true
+			}
+			// Fall through to shrink down to needed size
+		} else {
+			s.shrinkTicks = 0
+			return true
+		}
 	}
-	// Grow in 64px steps to minimize GDI reallocations
+	s.shrinkTicks = 0
+	// Round up in 64px steps to minimize GDI reallocations
 	newW := ((needW + 63) / 64) * 64
 	newH := ((needH + 63) / 64) * 64
-	if newW < s.w {
-		newW = s.w
-	}
-	if newH < s.h {
-		newH = s.h
+	if s.hBmp != 0 && (needW > s.w || needH > s.h) {
+		// When growing, don't shrink the other axis in the same step
+		if newW < s.w {
+			newW = s.w
+		}
+		if newH < s.h {
+			newH = s.h
+		}
 	}
 
 	var bi bitmapInfo
@@ -479,13 +497,15 @@ var (
 func enumVisibleWindows(selfHwnd uintptr, workArea image.Rectangle) []pet.WindowRect {
 	enumSelfHwnd = selfHwnd
 	enumWorkArea = workArea
-	enumCollected = make([]pet.WindowRect, 0, 12)
+	enumCollected = make([]pet.WindowRect, 0, 16)
 	procEnumWindows.Call(enumWinCb, 0)
-	return enumCollected
+	res := enumCollected
+	enumCollected = nil
+	return res
 }
 
 func enumWindowsProc(hwnd, _ uintptr) uintptr {
-	if len(enumCollected) >= 12 {
+	if len(enumCollected) >= 32 {
 		return 0 // stop enumeration
 	}
 	if hwnd == 0 || hwnd == enumSelfHwnd {

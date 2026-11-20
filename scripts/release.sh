@@ -35,31 +35,33 @@ TAG="v${NEW_VER}"
 WIN_VER_COMMA="${MAJ},${MIN},${PAT},0"
 WIN_VER_DOT="${MAJ}.${MIN}.${PAT}.0"
 
-echo "==> Releasing ChibiDesktopPet ${TAG}"
+echo "==> Releasing desktop-pet-tanjiro ${TAG}"
 echo "$NEW_VER" > VERSION
 
-# Sync version into Windows manifest & PE resource script
-sed -i '' -E "s/version=\"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\"/version=\"${WIN_VER_DOT}\"/" cmd/chibipet/app.manifest
-sed -i '' -E \
-  -e "s/FILEVERSION     [0-9]+,[0-9]+,[0-9]+,[0-9]+/FILEVERSION     ${WIN_VER_COMMA}/" \
-  -e "s/PRODUCTVERSION  [0-9]+,[0-9]+,[0-9]+,[0-9]+/PRODUCTVERSION  ${WIN_VER_COMMA}/" \
-  -e "s/\"FileVersion\",      \"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\"/\"FileVersion\",      \"${WIN_VER_DOT}\"/" \
-  -e "s/\"ProductVersion\",   \"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\"/\"ProductVersion\",   \"${WIN_VER_DOT}\"/" \
-  cmd/chibipet/app.rc
+# Sync version into Windows manifest & PE resource script (portable across macOS & Linux)
+perl -pi -e "s/version=\"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\"/version=\"${WIN_VER_DOT}\"/" cmd/chibipet/app.manifest
+perl -pi -e "
+  s/FILEVERSION     [0-9]+,[0-9]+,[0-9]+,[0-9]+/FILEVERSION     ${WIN_VER_COMMA}/;
+  s/PRODUCTVERSION  [0-9]+,[0-9]+,[0-9]+,[0-9]+/PRODUCTVERSION  ${WIN_VER_COMMA}/;
+  s/\"FileVersion\",      \"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\"/\"FileVersion\",      \"${WIN_VER_DOT}\"/;
+  s/\"ProductVersion\",   \"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\"/\"ProductVersion\",   \"${WIN_VER_DOT}\"/;
+" cmd/chibipet/app.rc
 
 # Recompile Windows PE resource (.syso) with embedded icon, manifest & updated version info
 (cd cmd/chibipet && x86_64-w64-mingw32-windres -F pe-x86-64 -i app.rc -o rsrc_windows_amd64.syso)
 
-# Run tests & Windows static checks
-go test -v ./...
+# Run uncached tests & Windows static checks
+go test -count=1 -v ./...
 GOOS=windows GOARCH=amd64 go vet ./...
 
 # Build standalone Windows 64-bit GUI executable
 mkdir -p dist
-GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-H=windowsgui -s -w" -o dist/ChibiDesktopPet.exe ./cmd/chibipet
+OUT_EXE="dist/desktop-pet-tanjiro.exe"
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-H=windowsgui -s -w" -o "$OUT_EXE" ./cmd/chibipet
 
-# Commit, tag, and push
-git add -A
+# Stage tracked changes + release metadata (avoid accidentally committing stray untracked files)
+git add -u
+git add VERSION cmd/chibipet/app.manifest cmd/chibipet/app.rc cmd/chibipet/rsrc_windows_amd64.syso
 if ! git diff --cached --quiet; then
   git commit -m "Release ${TAG}"
 fi
@@ -67,15 +69,15 @@ git tag -a "${TAG}" -m "Release ${TAG}"
 git push origin main
 git push origin "${TAG}"
 
-# Publish GitHub Release with ChibiDesktopPet.exe attached
+# Publish GitHub Release with desktop-pet-tanjiro.exe attached
 if [[ -n "$NOTES" ]]; then
-  gh release create "${TAG}" dist/ChibiDesktopPet.exe \
-    --title "Chibi Desktop Pet ${TAG}" \
+  gh release create "${TAG}" "$OUT_EXE" \
+    --title "desktop-pet-tanjiro ${TAG}" \
     --notes "$NOTES"
 else
-  gh release create "${TAG}" dist/ChibiDesktopPet.exe \
-    --title "Chibi Desktop Pet ${TAG}" \
+  gh release create "${TAG}" "$OUT_EXE" \
+    --title "desktop-pet-tanjiro ${TAG}" \
     --generate-notes
 fi
 
-echo "==> Done! Published ${TAG}"
+echo "==> Done! Published ${TAG} (${OUT_EXE})"

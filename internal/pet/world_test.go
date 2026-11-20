@@ -68,9 +68,9 @@ func TestLoadAndSimulateClipScenes(t *testing.T) {
 	}
 
 	// 5. Summon remaining characters -> total should be 6 (no duplicates)
-	w.SpawnAllEight()
+	w.SpawnAll()
 	if len(w.Pets) != 6 {
-		t.Fatalf("expected 6 unique pets after SpawnAllEight, got %d", len(w.Pets))
+		t.Fatalf("expected 6 unique pets after SpawnAll, got %d", len(w.Pets))
 	}
 	if w.SpawnRandomWithClaw() != nil {
 		t.Fatalf("expected SpawnRandomWithClaw to return nil when all 6 are already out")

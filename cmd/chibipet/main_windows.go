@@ -42,7 +42,6 @@ type desktopApp struct {
 	hIcon            uintptr
 	hCursorHand      uintptr
 	hCursorGrab      uintptr
-	hCursorArrow     uintptr
 	classNamePtr     *uint16
 	msgTaskbarCreate uint32
 
@@ -64,6 +63,9 @@ func main() {
 	// Single-instance check
 	mutexName := utf16Ptr("Local\\ChibiDesktopPet_SingleInstance_v1")
 	hMutex, _, lastErr := procCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(mutexName)))
+	if hMutex != 0 {
+		defer procCloseHandle.Call(hMutex)
+	}
 	if hMutex != 0 && lastErr == syscall.Errno(errorAlreadyExists) {
 		procMessageBoxW.Call(
 			0,
@@ -91,7 +93,6 @@ func main() {
 
 	hHand, _, _ := procLoadCursorW.Call(0, idcHand)
 	hGrab, _, _ := procLoadCursorW.Call(0, idcSizeAll)
-	hArrow, _, _ := procLoadCursorW.Call(0, idcArrow)
 
 	// Load embedded app icon resource (ID 1) for tray & window, falling back to runtime sprite icon
 	hIcon, _, _ := procLoadImageW.Call(hInst, 1, 1, 32, 32, 0) // IMAGE_ICON=1
@@ -109,7 +110,6 @@ func main() {
 		hIcon:            hIcon,
 		hCursorHand:      hHand,
 		hCursorGrab:      hGrab,
-		hCursorArrow:     hArrow,
 		classNamePtr:     className,
 		msgTaskbarCreate: uint32(tbMsg),
 		world:            pet.NewWorld(bank, workArea, screen, dpiScale),
@@ -374,7 +374,7 @@ func (a *desktopApp) handleCommand(cmd int, targetPetID int) {
 	case cmdSpawnRandom:
 		a.world.SpawnRandomWithClaw()
 	case cmdSpawnAll:
-		a.world.SpawnAllEight()
+		a.world.SpawnAll()
 	case cmdPetReact:
 		if targetPetID != 0 {
 			a.world.TriggerReact(targetPetID)

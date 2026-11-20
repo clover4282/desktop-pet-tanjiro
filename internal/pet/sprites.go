@@ -82,9 +82,18 @@ var Catalog = []CharacterDef{
 	},
 }
 
+// PremulSprite stores a sprite pre-converted to premultiplied BGRA (matching Win32 DIB layout)
+// so 40 FPS software blitting avoids per-pixel alpha premultiplication.
+type PremulSprite struct {
+	W, H   int
+	Stride int
+	Pix    []byte
+}
+
 type SpriteSet struct {
-	Def   CharacterDef
-	Poses [poseCount]*image.NRGBA
+	Def    CharacterDef
+	Poses  [poseCount]*image.NRGBA
+	Premul [poseCount]*PremulSprite
 }
 
 type SpriteBank struct {
@@ -110,12 +119,38 @@ func LoadSpriteBank() (*SpriteBank, error) {
 			if err != nil {
 				return nil, fmt.Errorf("decode %s: %w", path, err)
 			}
-			ss.Poses[i] = toNRGBA(img)
+			nrgba := toNRGBA(img)
+			ss.Poses[i] = nrgba
+			ss.Premul[i] = toPremulBGRA(nrgba)
 		}
 		bank.ByID[def.ID] = ss
 		bank.List = append(bank.List, ss)
 	}
 	return bank, nil
+}
+
+func toPremulBGRA(src *image.NRGBA) *PremulSprite {
+	w := src.Bounds().Dx()
+	h := src.Bounds().Dy()
+	stride := w * 4
+	pix := make([]byte, stride*h)
+	for y := 0; y < h; y++ {
+		sRow := y * src.Stride
+		dRow := y * stride
+		for x := 0; x < w; x++ {
+			si := sRow + x*4
+			di := dRow + x*4
+			a := uint32(src.Pix[si+3])
+			if a == 0 {
+				continue
+			}
+			pix[di+0] = byte((uint32(src.Pix[si+2])*a + 127) / 255) // B
+			pix[di+1] = byte((uint32(src.Pix[si+1])*a + 127) / 255) // G
+			pix[di+2] = byte((uint32(src.Pix[si+0])*a + 127) / 255) // R
+			pix[di+3] = byte(a)                                     // A
+		}
+	}
+	return &PremulSprite{W: w, H: h, Stride: stride, Pix: pix}
 }
 
 func toNRGBA(src image.Image) *image.NRGBA {

@@ -14,13 +14,11 @@ const (
 	StateClawSpawn PetState = iota
 	StateIdle
 	StateWalk
-	StateReact
 	StateGrabbed
 	StateFall
 	StateStacked
 	StateClawDismiss
 	StateClimbUp
-	StateClimbDown
 	StateMantle
 	StateJumpPrep
 	StateJumpArc
@@ -96,7 +94,6 @@ type Pet struct {
 	AttachedWinID uintptr // 0 = taskbar / screen edge, non-zero = HWND of tracked window
 	ClimbFaceDir  float64 // +1 = wall is to pet's right, -1 = wall is to pet's left
 	ClimbPhase    float64
-	ClimbSlide    bool    // true = playful fast wall slide down
 	ClimbGoalY    float64 // optional height to stop climbing and jump off
 	ClimbStepPrev float64 // previous sin(ClimbPhase) for hand-grip FX sync
 	MantleStartX  float64
@@ -169,7 +166,7 @@ type World struct {
 	hoverHasPrev   bool
 	hoverResetSec  float64
 	pendingIntro   float64
-	introRakkoID   int
+	introBaseID    int
 	introSpawnDone bool
 }
 
@@ -213,7 +210,7 @@ func (w *World) StartClipIntro() {
 	manggom.StateTimer = 4.0
 	w.Pets = append(w.Pets, manggom)
 
-	w.introRakkoID = manggom.ID
+	w.introBaseID = manggom.ID
 	w.pendingIntro = 0.55
 	w.introSpawnDone = false
 }
@@ -229,7 +226,7 @@ func (w *World) SetWorkArea(workArea, screen image.Rectangle) {
 	newFloor := float64(w.WorkArea.Max.Y)
 	dy := newFloor - oldFloor
 	for _, p := range w.Pets {
-		if p.AttachedWinID == 0 && (p.State == StateIdle || p.State == StateWalk || p.State == StateReact) {
+		if p.AttachedWinID == 0 && (p.State == StateIdle || p.State == StateWalk) {
 			p.Y = newFloor
 		} else if p.State == StateStacked {
 			p.Y += dy
@@ -269,7 +266,7 @@ func (w *World) SetWindows(wins []WindowRect) {
 		if or, had := oldMap[p.AttachedWinID]; had {
 			dx := float64(nr.Min.X - or.Min.X)
 			dy := float64(nr.Min.Y - or.Min.Y)
-			if p.State == StateClimbUp || p.State == StateClimbDown {
+			if p.State == StateClimbUp {
 				// Keep hugging exact updated left/right edge
 				size := w.PetSize()
 				if p.ClimbFaceDir > 0 {
@@ -444,7 +441,7 @@ func (w *World) SpawnRandomWithClaw() *Pet {
 	return w.SpawnWithClaw(def.ID, 0, 0)
 }
 
-func (w *World) SpawnAllEight() {
+func (w *World) SpawnAll() {
 	size := w.PetSize()
 	span := float64(w.WorkArea.Dx()) - size*1.4
 	step := span / float64(len(Catalog))
@@ -702,9 +699,6 @@ func (w *World) startFall(p *Pet, vx, vy float64) {
 	p.RubMeter = 0
 	// Character-specific initial fall burst
 	switch p.CharID {
-	case "usagi":
-		p.Squash = -0.18
-		p.VY = math.Min(vy, -110*w.Scale) // joyful little hop before spinning down!
 	case "zenitsu":
 		w.spawnParticleCustom(p.X-w.PetSize()*0.3, p.Y-w.PetSize()*0.75, -45, -70, 0.55, 7, ParticleSweat, color.NRGBA{120, 210, 255, 255})
 		w.spawnParticleCustom(p.X+w.PetSize()*0.3, p.Y-w.PetSize()*0.75, 45, -70, 0.55, 7, ParticleSweat, color.NRGBA{120, 210, 255, 255})
@@ -803,22 +797,6 @@ func (w *World) applyRubImpulse(p *Pet, dx, dy float64) {
 		// Super squishy mochi dough stretch under your cursor!
 		p.Squash = clampF(p.Squash+0.14+math.Abs(dy)*0.004, -0.25, 0.44)
 		p.Tilt = clampF(p.Tilt+dir*0.16, -0.34, 0.34)
-	case "usagi":
-		// Hyper excited wiggling & bouncy energy!
-		p.Squash = clampF(p.Squash-0.11, -0.28, 0.28)
-		p.Tilt = clampF(p.Tilt+dir*0.18, -0.28, 0.28)
-	case "chiikawa":
-		// Gentle soft shy squish & cozy sway
-		p.Squash = clampF(p.Squash+0.09, -0.18, 0.26)
-		p.Tilt = clampF(p.Tilt+dir*0.10, -0.20, 0.20)
-	case "rakko":
-		// Stoic at first, then melts softly!
-		if p.RubMeter < 0.35 {
-			p.Tilt = clampF(p.Tilt+dir*0.05, -0.12, 0.12)
-		} else {
-			p.Squash = clampF(p.Squash+0.10, -0.18, 0.28)
-			p.Tilt = clampF(p.Tilt+dir*0.11, -0.22, 0.22)
-		}
 	case "tanjiro":
 		// Warm kind sway + gentle water bounce
 		p.Squash = clampF(p.Squash-0.08, -0.22, 0.22)
@@ -884,7 +862,7 @@ func isStackableHost(p *Pet) bool {
 	if p == nil {
 		return false
 	}
-	return p.State == StateIdle || p.State == StateWalk || p.State == StateReact || p.State == StateStacked
+	return p.State == StateIdle || p.State == StateWalk || p.State == StateStacked
 }
 
 func (w *World) IsDragging() bool {
@@ -1033,7 +1011,7 @@ func (w *World) Step(dt float64) {
 		w.pendingIntro -= dt
 		if w.pendingIntro <= 0 {
 			w.introSpawnDone = true
-			if base := w.FindPet(w.introRakkoID); base != nil {
+			if base := w.FindPet(w.introBaseID); base != nil {
 				w.SpawnWithClaw("tanjiro", base.X, base.ID)
 			}
 		}
@@ -1164,9 +1142,6 @@ func (w *World) Step(dt float64) {
 		case StateClimbUp:
 			w.stepClimbUp(p, dt, floorY)
 
-		case StateClimbDown:
-			w.stepClimbDown(p, dt, floorY)
-
 		case StateMantle:
 			w.stepMantle(p, dt)
 
@@ -1292,17 +1267,6 @@ func (w *World) stepRubbing(p *Pet, dt float64) {
 	p.RubParticleAcc += dt
 	emitInterval := 0.14
 	switch p.CharID {
-	case "chiikawa":
-		// Shy soft tremble + gentle pink hearts
-		p.JitterX = math.Sin(p.AnimTime*32) * 1.6 * w.Scale
-		emitInterval = 0.15
-	case "usagi":
-		// Hyper wiggly excitement + rapid golden sparkles
-		p.JitterX = math.Sin(p.AnimTime*40) * 2.4 * w.Scale
-		emitInterval = 0.11
-	case "rakko":
-		// Melts smoothly into golden stars
-		emitInterval = 0.16
 	case "manggom":
 		// Super squishy jelly sway + hearts
 		p.Tilt += math.Sin(p.AnimTime*14) * 0.025
@@ -1348,17 +1312,6 @@ func (w *World) stepRubbing(p *Pet, dt float64) {
 	vy := math.Sin(theta)*30 - 35
 
 	switch p.CharID {
-	case "chiikawa":
-		w.spawnParticleCustom(px, py, vx, vy, 0.95, 7.5, ParticleHeart, color.NRGBA{255, 145, 180, 255})
-	case "usagi":
-		w.spawnParticleCustom(px, py, vx*1.4, vy-20, 0.8, 8.5, ParticleSparkle, color.NRGBA{255, 210, 65, 255})
-	case "rakko":
-		col := color.NRGBA{255, 215, 95, 255}
-		if p.RubMeter >= 0.4 {
-			w.spawnParticleCustom(px, py, vx, vy, 0.95, 8.0, ParticleSparkle, col)
-		} else {
-			w.spawnParticleCustom(px, py, vx*0.6, vy*0.6, 0.7, 6.0, ParticleSparkle, col)
-		}
 	case "manggom":
 		w.spawnParticleCustom(px, py, vx, vy, 1.0, 8.5, ParticleHeart, color.NRGBA{255, 125, 165, 255})
 	case "tanjiro":
@@ -1413,45 +1366,6 @@ func (w *World) stepFall(p *Pet, dt, floorY float64) {
 	// Character-specific gravity, mid-air rotation, horizontal motion & trail particles!
 	gravity := 1650.0 * w.Scale
 	switch p.CharID {
-	case "chiikawa":
-		// Timid fluttering light fall with rapid shiver & tiny sweat drops
-		gravity = 1180.0 * w.Scale
-		p.VY = math.Min(p.VY+gravity*dt, 540*w.Scale)
-		p.X += (p.VX + math.Sin(p.FallTime*14)*35*w.Scale) * dt
-		p.JitterX = math.Sin(p.FallTime*52) * 3.0 * w.Scale
-		p.Tilt = math.Sin(p.FallTime*12) * 0.14
-		if p.FallTrailAcc >= 0.09 {
-			p.FallTrailAcc = 0
-			w.spawnParticleCustom(p.X+(w.rng.Float64()-0.5)*size*0.5, p.Y-size*0.6, (w.rng.Float64()-0.5)*50, -30, 0.55, 6.0, ParticleSweat, color.NRGBA{140, 215, 255, 235})
-		}
-
-	case "usagi":
-		// Chaotic somersault front-flips + golden star trail!
-		gravity = 1580.0 * w.Scale
-		p.VY += gravity * dt
-		p.X += p.VX * dt
-		spinDir := 1.0
-		if p.VX < -15 {
-			spinDir = -1.0
-		}
-		p.Tilt += spinDir * 11.5 * dt
-		if p.FallTrailAcc >= 0.06 {
-			p.FallTrailAcc = 0
-			w.spawnParticleCustom(p.X+(w.rng.Float64()-0.5)*size*0.4, p.Y-size*0.5, (w.rng.Float64()-0.5)*60, -45, 0.55, 7.5, ParticleSparkle, color.NRGBA{255, 215, 65, 255})
-		}
-
-	case "rakko":
-		// Noble cape glide: smooth gentle S-curve descent with capped terminal velocity!
-		gravity = 920.0 * w.Scale
-		p.VY = math.Min(p.VY+gravity*dt, 380*w.Scale)
-		glideVX := math.Sin(p.FallTime*6.2) * 95.0 * w.Scale
-		p.X += (p.VX*0.5 + glideVX) * dt
-		p.Tilt = clampF(glideVX/(360*w.Scale), -0.22, 0.22)
-		if p.FallTrailAcc >= 0.10 {
-			p.FallTrailAcc = 0
-			w.spawnParticleCustom(p.X+(w.rng.Float64()-0.5)*size*0.45, p.Y-size*0.4, -glideVX*0.2, -25, 0.65, 6.5, ParticleSparkle, color.NRGBA{255, 225, 130, 230})
-		}
-
 	case "manggom":
 		// Stretchy squishy jelly/mochi fall!
 		gravity = 1380.0 * w.Scale
@@ -1590,16 +1504,6 @@ func (w *World) stepFall(p *Pet, dt, floorY float64) {
 	if p.Y >= floorY {
 		p.Y = floorY
 		p.AttachedWinID = 0
-		// Usagi's iconic elastic joyful super-bounce on first landing from a decent height!
-		if p.CharID == "usagi" && p.FallBounces == 0 && p.FallHeight > size*0.85 {
-			p.FallBounces++
-			p.VY = -340.0 * w.Scale
-			p.Squash = 0.36
-			p.Tilt = 0
-			w.addGroundEffect(p.X, floorY-2, size*0.62, 0.38, EffectStarBurst, color.NRGBA{255, 210, 65, 230})
-			w.spawnReactionParticles(p, 4)
-			return
-		}
 		p.VX = 0
 		p.VY = 0
 		p.Tilt = 0
@@ -1621,12 +1525,6 @@ type walkGait struct {
 
 func characterGait(charID string) walkGait {
 	switch charID {
-	case "chiikawa":
-		return walkGait{speed: 52, stride: 26, hop: 4.5, waddle: 0.085, lean: 0.03}
-	case "usagi":
-		return walkGait{speed: 82, stride: 34, hop: 12.5, waddle: 0.095, lean: 0.06, stepDust: true}
-	case "rakko":
-		return walkGait{speed: 66, stride: 30, hop: 5.5, waddle: 0.055, lean: 0.04}
 	case "manggom":
 		return walkGait{speed: 52, stride: 28, hop: 5.5, waddle: 0.055, lean: 0.03}
 	case "tanjiro":
@@ -1960,9 +1858,9 @@ func (w *World) stepClimbUp(p *Pet, dt, floorY float64) {
 	switch p.CharID {
 	case "inosuke", "akaza":
 		freq, baseSpd = 8.2, 106.0*w.Scale
-	case "usagi", "kyojuro":
+	case "kyojuro":
 		freq, baseSpd = 7.4, 92.0*w.Scale
-	case "chiikawa", "manggom":
+	case "manggom":
 		freq, baseSpd = 5.6, 60.0*w.Scale
 	}
 	prevSin := math.Sin(p.ClimbPhase)
@@ -1981,7 +1879,7 @@ func (w *World) stepClimbUp(p *Pet, dt, floorY float64) {
 	if (prevSin <= 0 && curSin > 0) || (prevSin >= 0 && curSin < 0) {
 		gripX := p.X + p.ClimbFaceDir*size*0.24
 		gripY := p.Y - size*0.42
-		if (p.CharID == "chiikawa" || p.CharID == "zenitsu") && w.rng.Float64() < 0.45 {
+		if p.CharID == "zenitsu" && w.rng.Float64() < 0.45 {
 			w.spawnParticleCustom(p.X-p.ClimbFaceDir*size*0.25, p.Y-size*0.72, -p.ClimbFaceDir*35, -30, 0.48, 5.5, ParticleSweat, color.NRGBA{135, 215, 255, 225})
 		} else if p.CharID == "kyojuro" && w.rng.Float64() < 0.4 {
 			w.spawnParticleCustom(gripX, gripY, -p.ClimbFaceDir*25, 20, 0.4, 5.5, ParticleFlame, color.NRGBA{255, 145, 45, 215})
@@ -2030,94 +1928,6 @@ func (w *World) stepMantle(p *Pet, dt float64) {
 	p.X = p.MantleStartX + (p.MantleEndX-p.MantleStartX)*ease
 	p.Y = p.MantleTopY - arcH
 	p.Tilt = p.ClimbFaceDir * (0.24 * (1 - t))
-}
-
-func (w *World) startClimbDown(p *Pet, winID uintptr, faceDir float64) {
-	w.unstackChildren(p.ID)
-	p.StackParentID = 0
-	p.AttachedWinID = winID
-	p.ClimbFaceDir = faceDir
-	p.FacingLeft = faceDir < 0
-	p.State = StateClimbDown
-	p.ClimbPhase = 0
-	p.ClimbSlide = w.rng.Float64() < 0.55 // 55% fun wall-slide, 45% careful climb-down!
-	p.VX = 0
-	p.VY = 0
-	p.TargetVX = 0
-	p.ReactTimer = 0
-	size := w.PetSize()
-	if winID != 0 {
-		if win, ok := w.findWindow(winID); ok {
-			if faceDir > 0 {
-				p.X = float64(win.Rect.Min.X) - size*0.24
-			} else {
-				p.X = float64(win.Rect.Max.X) + size*0.24
-			}
-			p.Y = float64(win.Rect.Min.Y) + size*0.22
-		}
-	}
-}
-
-func (w *World) stepClimbDown(p *Pet, dt, floorY float64) {
-	size := w.PetSize()
-	bottomY := floorY
-	if p.AttachedWinID != 0 {
-		win, ok := w.findWindow(p.AttachedWinID)
-		if !ok {
-			p.AttachedWinID = 0
-			w.startFall(p, 0, 0)
-			return
-		}
-		if p.ClimbFaceDir > 0 {
-			p.X = float64(win.Rect.Min.X) - size*0.24
-		} else {
-			p.X = float64(win.Rect.Max.X) + size*0.24
-		}
-		if float64(win.Rect.Max.Y) < bottomY {
-			bottomY = float64(win.Rect.Max.Y)
-		}
-	}
-
-	if p.ClimbSlide {
-		// Playful smooth wall-slide!
-		slideSpeed := 175.0 * w.Scale
-		p.Y += slideSpeed * dt
-		p.Tilt = p.ClimbFaceDir * 0.16
-		p.Squash = -0.10
-		p.WalkDustAcc += dt
-		if p.WalkDustAcc >= 0.08 {
-			p.WalkDustAcc = 0
-			w.spawnParticleCustom(p.X+p.ClimbFaceDir*size*0.22, p.Y-size*0.35, -p.ClimbFaceDir*28, -40, 0.45, 5.5, ParticleDust, color.NRGBA{238, 234, 228, 195})
-		}
-	} else {
-		// Careful rhythmic climb-down!
-		p.ClimbPhase += dt * 6.5
-		step := math.Max(0, math.Sin(p.ClimbPhase))
-		p.Y += (68.0 * w.Scale) * (0.4 + 0.9*step) * dt
-		p.Tilt = p.ClimbFaceDir * (0.12 - 0.06*step)
-	}
-
-	if p.Y >= bottomY {
-		p.Y = bottomY
-		oldWin := p.AttachedWinID
-		p.AttachedWinID = 0
-		if bottomY >= floorY-4 {
-			// Stepped onto the taskbar!
-			p.Y = floorY
-			p.Tilt = 0
-			p.Squash = 0.20
-			p.State = StateIdle
-			p.StateTimer = 1.4 + w.rng.Float64()*2.4
-			// Push slightly clear of wall edge
-			p.X -= p.ClimbFaceDir * size * 0.2
-			w.clampPetX(p)
-		} else {
-			// Window floats above taskbar -> drop playfully down to taskbar with character fall!
-			p.IgnoreWinID = oldWin
-			p.IgnoreWinTime = 0.55
-			w.startFall(p, -p.ClimbFaceDir*65*w.Scale, 40*w.Scale)
-		}
-	}
 }
 
 func (w *World) startJumpPrep(p *Pet, dirX float64) {
@@ -2337,18 +2147,6 @@ func (w *World) triggerCharacterLandingFX(p *Pet, onHead bool) {
 	y := p.Y - 2
 
 	switch p.CharID {
-	case "chiikawa":
-		p.Squash = 0.34
-		w.spawnParticleCustom(p.X-size*0.35, p.Y-size*0.5, -35, -50, 0.7, 7, ParticleHeart, color.NRGBA{255, 160, 190, 240})
-		w.spawnParticleCustom(p.X+size*0.35, p.Y-size*0.5, 35, -50, 0.7, 7, ParticleSparkle, color.NRGBA{255, 225, 110, 240})
-	case "usagi":
-		p.Squash = 0.30
-		w.addGroundEffect(p.X, y, size*0.68*scaleMul, 0.42, EffectStarBurst, color.NRGBA{255, 210, 65, 235})
-		w.spawnReactionParticles(p, 5)
-	case "rakko":
-		p.Squash = 0.18 // crisp cool hero landing!
-		w.addGroundEffect(p.X, y, size*0.65*scaleMul, 0.45, EffectStarBurst, color.NRGBA{255, 220, 100, 235})
-		w.spawnReactionParticles(p, 4)
 	case "manggom":
 		// GIANT squishy mochi pancake splat-bounce!
 		p.Squash = 0.56
