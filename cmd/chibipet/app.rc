@@ -4,8 +4,8 @@
 1 24 "app.manifest"
 
 1 VERSIONINFO
-FILEVERSION     1,0,3,0
-PRODUCTVERSION  1,0,3,0
+FILEVERSION     1,0,4,0
+PRODUCTVERSION  1,0,4,0
 FILEFLAGSMASK   0x3fL
 FILEFLAGS       0x0L
 FILEOS          0x40004L
@@ -17,11 +17,11 @@ BEGIN
         BLOCK "041204b0"
         BEGIN
             VALUE "FileDescription",  "치비 데스크톱 펫 (Chibi Desktop Pet)"
-            VALUE "FileVersion",      "1.0.3.0"
+            VALUE "FileVersion",      "1.0.4.0"
             VALUE "InternalName",     "desktop-pet-tanjiro"
             VALUE "OriginalFilename", "desktop-pet-tanjiro.exe"
             VALUE "ProductName",      "치비 데스크톱 펫"
-            VALUE "ProductVersion",   "1.0.3.0"
+            VALUE "ProductVersion",   "1.0.4.0"
         END
     END
     BLOCK "VarFileInfo"
