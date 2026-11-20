@@ -334,6 +334,230 @@ func TestStackedPetAutoHopsOff(t *testing.T) {
 	}
 }
 
+func TestStepStackingNonLastPetNoCorruption(t *testing.T) {
+	bank, err := LoadSpriteBank()
+	if err != nil {
+		t.Fatalf("LoadSpriteBank failed: %v", err)
+	}
+	screen := image.Rect(0, 0, 1280, 720)
+	workArea := image.Rect(0, 0, 1280, 672)
+	w := NewWorld(bank, workArea, screen, 1.0)
+	w.Pets = nil
+	w.introSpawnDone = true
+	w.FreeRoam = false
+
+	// Place falling pet FIRST in w.Pets so attachStack->bringToFront moves it past B and C.
+	host := w.newPet("manggom", 500, float64(workArea.Max.Y))
+	falling := w.newPet("tanjiro", 500, w.HeadTopY(host)-18)
+	bystander := w.newPet("zenitsu", 900, float64(workArea.Max.Y))
+	w.Pets = []*Pet{falling, bystander, host}
+	w.startFall(falling, 0, 120)
+
+	for i := 0; i < 30; i++ {
+		w.Step(1.0 / 40.0)
+	}
+
+	if len(w.Pets) != 3 {
+		t.Fatalf("expected 3 pets preserved after non-last pet stacked, got %d", len(w.Pets))
+	}
+	seen := make(map[int]bool, 3)
+	for _, p := range w.Pets {
+		if seen[p.ID] {
+			t.Fatalf("duplicate pet ID %d in w.Pets after Step stacking", p.ID)
+		}
+		seen[p.ID] = true
+	}
+	for _, want := range []int{falling.ID, bystander.ID, host.ID} {
+		if !seen[want] {
+			t.Fatalf("pet ID %d was lost from w.Pets during Step stacking", want)
+		}
+	}
+	if falling.State != StateStacked || falling.StackParentID != host.ID {
+		t.Fatalf("expected falling pet stacked on host, got state=%v parent=%d", falling.State, falling.StackParentID)
+	}
+}
+
+func TestSetWindowsOccludingAndMantleAndRightWallOcclusion(t *testing.T) {
+	bank, err := LoadSpriteBank()
+	if err != nil {
+		t.Fatalf("LoadSpriteBank failed: %v", err)
+	}
+	screen := image.Rect(0, 0, 1280, 720)
+	workArea := image.Rect(0, 0, 1280, 672)
+	w := NewWorld(bank, workArea, screen, 1.0)
+	w.Pets = nil
+	w.introSpawnDone = true
+	w.FreeRoam = true
+
+	win := WindowRect{ID: 201, Rect: image.Rect(300, 220, 900, 620)}
+	w.SetWindows([]WindowRect{win})
+
+	// 1. Pet standing on window falls immediately when window becomes maximized/Occluding
+	kyojuro := w.newPet("kyojuro", 500, float64(win.Rect.Min.Y))
+	kyojuro.AttachedWinID = win.ID
+	w.Pets = append(w.Pets, kyojuro)
+
+	w.SetWindows([]WindowRect{{ID: 201, Rect: workArea, Occluding: true}})
+	if kyojuro.State != StateFall || kyojuro.AttachedWinID != 0 {
+		t.Fatalf("expected pet to fall when attached window becomes Occluding, got state=%v win=%d", kyojuro.State, kyojuro.AttachedWinID)
+	}
+	if kyojuro.Y == float64(workArea.Min.Y) {
+		t.Fatalf("pet should not teleport to maximized window top Y=0 before falling")
+	}
+
+	// 2. Pet in StateMantle tracks window move and falls if window maximizes or closes mid-mantle
+	w.SetWindows([]WindowRect{win})
+	tanjiro := w.newPet("tanjiro", float64(win.Rect.Min.X)-w.PetSize()*0.24, float64(win.Rect.Min.Y)+2)
+	w.Pets = []*Pet{tanjiro}
+	w.StartClimbWindow(tanjiro.ID, win.ID, true)
+	for i := 0; i < 10 && tanjiro.State != StateMantle; i++ {
+		w.Step(1.0 / 40.0)
+	}
+	if tanjiro.State != StateMantle {
+		t.Fatalf("expected Tanjiro to enter StateMantle at top of window, got state=%v", tanjiro.State)
+	}
+	oldEndX := tanjiro.MantleEndX
+	w.SetWindows([]WindowRect{{ID: 201, Rect: image.Rect(360, 250, 960, 650)}})
+	if tanjiro.MantleEndX != oldEndX+60 || tanjiro.MantleTopY != 250 {
+		t.Fatalf("expected StateMantle to track moved window, got endX=%.1f (want %.1f) topY=%.1f", tanjiro.MantleEndX, oldEndX+60, tanjiro.MantleTopY)
+	}
+	w.SetWindows([]WindowRect{{ID: 201, Rect: workArea, Occluding: true}})
+	if tanjiro.State != StateFall || tanjiro.AttachedWinID != 0 {
+		t.Fatalf("expected mantling pet to fall when window maximizes, got state=%v win=%d", tanjiro.State, tanjiro.AttachedWinID)
+	}
+
+	// 3. Right-wall climb drops when a foreground window shares exact Max.X
+	backWin := WindowRect{ID: 301, Rect: image.Rect(400, 180, 900, 620)}
+	w.SetWindows([]WindowRect{backWin})
+	inosuke := w.newPet("inosuke", 930, 500)
+	w.Pets = []*Pet{inosuke}
+	w.StartClimbWindow(inosuke.ID, backWin.ID, false)
+	if inosuke.State != StateClimbUp {
+		t.Fatalf("expected Inosuke climbing right wall, got %v", inosuke.State)
+	}
+	frontSameMaxX := WindowRect{ID: 302, Rect: image.Rect(500, 180, 900, 620)}
+	w.SetWindows([]WindowRect{frontSameMaxX, backWin})
+	w.Step(1.0 / 40.0)
+	if inosuke.State != StateFall || inosuke.AttachedWinID != 0 {
+		t.Fatalf("expected right-wall climber to fall when foreground window shares Max.X, got state=%v", inosuke.State)
+	}
+}
+
+func TestClawSpawnTargetParentUnavailable(t *testing.T) {
+	bank, err := LoadSpriteBank()
+	if err != nil {
+		t.Fatalf("LoadSpriteBank failed: %v", err)
+	}
+	screen := image.Rect(0, 0, 1280, 720)
+	workArea := image.Rect(0, 0, 1280, 672)
+	w := NewWorld(bank, workArea, screen, 1.0)
+	w.Pets = nil
+	w.introSpawnDone = true
+	w.FreeRoam = false
+
+	win := WindowRect{ID: 401, Rect: image.Rect(300, 180, 900, 620)}
+	w.SetWindows([]WindowRect{win})
+
+	// Case A: TargetParent starts climbing before claw arrives -> claw clears TargetParent and lands on floor
+	host := w.newPet("manggom", 268, float64(workArea.Max.Y))
+	w.Pets = []*Pet{host}
+	spawned := w.SpawnWithClaw("tanjiro", host.X, host.ID)
+	w.StartClimbWindow(host.ID, win.ID, true)
+
+	for i := 0; i < 120; i++ {
+		w.Step(1.0 / 40.0)
+	}
+	if spawned.StackParentID == host.ID {
+		t.Fatalf("spawned pet must NOT stack onto climbing TargetParent")
+	}
+	if spawned.State != StateIdle || spawned.Y != float64(workArea.Max.Y) {
+		t.Fatalf("expected spawned pet to land on floor, got state=%v y=%.1f", spawned.State, spawned.Y)
+	}
+
+	// Case B: TargetParent already gains a stack child while claw is descending -> no multi-child fork
+	host2 := w.newPet("kyojuro", 700, float64(workArea.Max.Y))
+	occupier := w.newPet("akaza", 700, float64(workArea.Max.Y)-100)
+	w.Pets = []*Pet{host2, occupier}
+	spawned2 := w.SpawnWithClaw("zenitsu", host2.X, host2.ID)
+	w.attachStack(occupier, host2)
+
+	for i := 0; i < 120; i++ {
+		w.Step(1.0 / 40.0)
+	}
+	childrenOfHost2 := 0
+	for _, p := range w.Pets {
+		if p.StackParentID == host2.ID {
+			childrenOfHost2++
+		}
+	}
+	if childrenOfHost2 > 1 {
+		t.Fatalf("expected at most 1 direct child on host2, got %d (spawned2 parent=%d)", childrenOfHost2, spawned2.StackParentID)
+	}
+}
+
+func TestRotatedFallRenderBoundsAndRenderBGRA(t *testing.T) {
+	bank, err := LoadSpriteBank()
+	if err != nil {
+		t.Fatalf("LoadSpriteBank failed: %v", err)
+	}
+	screen := image.Rect(0, 0, 1280, 720)
+	workArea := image.Rect(0, 0, 1280, 672)
+	w := NewWorld(bank, workArea, screen, 1.0)
+	w.Pets = nil
+	w.introSpawnDone = true
+	w.FreeRoam = false
+
+	// Upright pet RenderBGRA sanity check
+	p := w.newPet("inosuke", 640, 360)
+	w.Pets = []*Pet{p}
+	upBounds := w.RenderBounds()
+	if upBounds.Empty() {
+		t.Fatalf("expected non-empty RenderBounds for upright pet")
+	}
+	upBuf := make([]byte, upBounds.Dx()*upBounds.Dy()*4)
+	w.RenderBGRA(upBuf, upBounds.Dx(), upBounds.Dy(), upBounds.Min.X, upBounds.Min.Y)
+	upNonZero := 0
+	for i := 3; i < len(upBuf); i += 4 {
+		if upBuf[i] > 0 {
+			upNonZero++
+		}
+	}
+	if upNonZero == 0 {
+		t.Fatalf("expected visible pixels in upright RenderBGRA")
+	}
+
+	// Rotated StateFall (45 deg & 180 deg) must stay inside RenderBounds with no clipping at edges
+	p.State = StateFall
+	for _, angle := range []float64{0.785398, 1.570796, 3.14159} {
+		p.Tilt = angle
+		rotBounds := w.RenderBounds()
+		if rotBounds.Empty() {
+			t.Fatalf("expected non-empty RenderBounds for rotated fall angle=%.2f", angle)
+		}
+		// Render into a larger canvas and verify no non-zero pixels fall outside rotBounds
+		pad := 60
+		big := rotBounds.Inset(-pad).Intersect(screen)
+		bigBuf := make([]byte, big.Dx()*big.Dy()*4)
+		w.RenderBGRA(bigBuf, big.Dx(), big.Dy(), big.Min.X, big.Min.Y)
+
+		rotNonZero := 0
+		for y := big.Min.Y; y < big.Max.Y; y++ {
+			for x := big.Min.X; x < big.Max.X; x++ {
+				a := bigBuf[((y-big.Min.Y)*big.Dx()+(x-big.Min.X))*4+3]
+				if a > 0 {
+					rotNonZero++
+					if !image.Pt(x, y).In(rotBounds) {
+						t.Fatalf("rotated fall pixel (%d,%d) clipped outside RenderBounds %v at angle=%.2f", x, y, rotBounds, angle)
+					}
+				}
+			}
+		}
+		if rotNonZero == 0 {
+			t.Fatalf("expected visible pixels in rotated RenderBGRA at angle=%.2f", angle)
+		}
+	}
+}
+
 func saveMockup(t *testing.T, w *World, filename string) {
 	t.Helper()
 	outDir := os.Getenv("PET_PREVIEW_DIR")

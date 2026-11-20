@@ -38,11 +38,9 @@ const (
 
 type desktopApp struct {
 	hwnd             uintptr
-	hInstance        uintptr
 	hIcon            uintptr
 	hCursorHand      uintptr
 	hCursorGrab      uintptr
-	classNamePtr     *uint16
 	msgTaskbarCreate uint32
 
 	world          *pet.World
@@ -94,11 +92,15 @@ func main() {
 	hHand, _, _ := procLoadCursorW.Call(0, idcHand)
 	hGrab, _, _ := procLoadCursorW.Call(0, idcSizeAll)
 
-	// Load embedded app icon resource (ID 1) for tray & window, falling back to runtime sprite icon
-	hIcon, _, _ := procLoadImageW.Call(hInst, 1, 1, 32, 32, 0) // IMAGE_ICON=1
+	// Load embedded app icon resource (ID 1) at DPI-scaled size for tray & window, falling back to runtime sprite icon
+	iconSz, _, _ := procGetSystemMetrics.Call(smCXIcon)
+	if iconSz < 16 || iconSz > 128 {
+		iconSz = 32
+	}
+	hIcon, _, _ := procLoadImageW.Call(hInst, 1, 1, iconSz, iconSz, 0) // IMAGE_ICON=1
 	if hIcon == 0 {
-		if ss := bank.ByID["manggom"]; ss != nil {
-			hIcon = createIconFromSprite(ss.Poses[pet.PoseIdle])
+		if ss := bank.ByID["manggom"]; ss != nil && ss.IdleNRGBA != nil {
+			hIcon = createIconFromSprite(ss.IdleNRGBA)
 		}
 	}
 
@@ -106,16 +108,24 @@ func main() {
 	tbMsg, _, _ := procRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(utf16Ptr("TaskbarCreated"))))
 
 	app = &desktopApp{
-		hInstance:        hInst,
 		hIcon:            hIcon,
 		hCursorHand:      hHand,
 		hCursorGrab:      hGrab,
-		classNamePtr:     className,
 		msgTaskbarCreate: uint32(tbMsg),
 		world:            pet.NewWorld(bank, workArea, screen, dpiScale),
 		surface:          newDIBSurface(),
 		lastTick:         time.Now(),
 		visible:          true,
+	}
+
+	cleanupStartup := func() {
+		if app.surface != nil {
+			app.surface.close()
+		}
+		if app.hIcon != 0 {
+			procDestroyIcon.Call(app.hIcon)
+			app.hIcon = 0
+		}
 	}
 
 	wc := wndClassExW{
@@ -128,6 +138,7 @@ func main() {
 		LpszClassName: className,
 	}
 	if atom, _, _ := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc))); atom == 0 {
+		cleanupStartup()
 		return
 	}
 
@@ -143,6 +154,7 @@ func main() {
 		0, 0, hInst, 0,
 	)
 	if hwnd == 0 {
+		cleanupStartup()
 		return
 	}
 	app.hwnd = hwnd
@@ -188,7 +200,7 @@ func (a *desktopApp) renderFrame() {
 	if bounds.Empty() {
 		// Render a 1x1 fully transparent pixel instead of hiding HWND so tray TrackPopupMenu
 		// SetForegroundWindow always works reliably even when all pets are cleared.
-		if a.visible && a.surface.ensureSize(1, 1) {
+		if a.visible && a.surface.shrinkTo(1, 1) {
 			clear(a.surface.buf[:4])
 			ptDst := point{X: 0, Y: 0}
 			sz := sizeStruct{CX: 1, CY: 1}
@@ -263,33 +275,36 @@ func (a *desktopApp) showContextMenu(screenX, screenY int32, targetPetID int) {
 	defer procDestroyMenu.Call(hMenu)
 
 	// Submenu: Summon characters with propeller claw (prevent duplicates!)
-	hSpawn, _, _ := procCreatePopupMenu.Call()
-	prevGroup := ""
-	remaining := 0
-	for i, def := range pet.Catalog {
-		if prevGroup != "" && def.Group != prevGroup {
-			procAppendMenuW.Call(hSpawn, mfSeparator, 0, 0)
+	if hSpawn, _, _ := procCreatePopupMenu.Call(); hSpawn != 0 {
+		prevGroup := ""
+		remaining := 0
+		for i, def := range pet.Catalog {
+			if prevGroup != "" && def.Group != prevGroup {
+				procAppendMenuW.Call(hSpawn, mfSeparator, 0, 0)
+			}
+			prevGroup = def.Group
+			flags := uintptr(mfString)
+			label := fmt.Sprintf("[%s] %s", def.Group, def.Name)
+			if a.world.HasCharacter(def.ID) {
+				flags |= mfGrayed | mfChecked
+				label += " (소환됨)"
+			} else {
+				remaining++
+			}
+			procAppendMenuW.Call(hSpawn, flags, uintptr(cmdSpawnBase+i), uintptr(unsafe.Pointer(utf16Ptr(label))))
 		}
-		prevGroup = def.Group
-		flags := uintptr(mfString)
-		label := fmt.Sprintf("[%s] %s", def.Group, def.Name)
-		if a.world.HasCharacter(def.ID) {
-			flags |= mfGrayed | mfChecked
-			label += " (소환됨)"
-		} else {
-			remaining++
+		procAppendMenuW.Call(hSpawn, mfSeparator, 0, 0)
+		bulkFlags := uintptr(mfString)
+		if remaining == 0 {
+			bulkFlags |= mfGrayed
 		}
-		procAppendMenuW.Call(hSpawn, flags, uintptr(cmdSpawnBase+i), uintptr(unsafe.Pointer(utf16Ptr(label))))
-	}
-	procAppendMenuW.Call(hSpawn, mfSeparator, 0, 0)
-	bulkFlags := uintptr(mfString)
-	if remaining == 0 {
-		bulkFlags |= mfGrayed
-	}
-	procAppendMenuW.Call(hSpawn, bulkFlags, cmdSpawnRandom, uintptr(unsafe.Pointer(utf16Ptr("랜덤 캐릭터 소환"))))
-	procAppendMenuW.Call(hSpawn, bulkFlags, cmdSpawnAll, uintptr(unsafe.Pointer(utf16Ptr("남은 캐릭터 전원 소환"))))
+		procAppendMenuW.Call(hSpawn, bulkFlags, cmdSpawnRandom, uintptr(unsafe.Pointer(utf16Ptr("랜덤 캐릭터 소환"))))
+		procAppendMenuW.Call(hSpawn, bulkFlags, cmdSpawnAll, uintptr(unsafe.Pointer(utf16Ptr("남은 캐릭터 전원 소환"))))
 
-	procAppendMenuW.Call(hMenu, mfPopup, hSpawn, uintptr(unsafe.Pointer(utf16Ptr("캐릭터 소환 (프로펠러 집게)"))))
+		if ok, _, _ := procAppendMenuW.Call(hMenu, mfPopup, hSpawn, uintptr(unsafe.Pointer(utf16Ptr("캐릭터 소환 (프로펠러 집게)")))); ok == 0 {
+			procDestroyMenu.Call(hSpawn)
+		}
+	}
 
 	if targetPetID != 0 {
 		if p := a.world.FindPet(targetPetID); p != nil {
@@ -306,18 +321,21 @@ func (a *desktopApp) showContextMenu(screenX, screenY int32, targetPetID int) {
 	procAppendMenuW.Call(hMenu, mfSeparator, 0, 0)
 
 	// Submenu: Scale
-	hScale, _, _ := procCreatePopupMenu.Call()
-	scaleFlags := func(target float64) uintptr {
-		if a.world.Scale > target-0.05 && a.world.Scale < target+0.05 {
-			return mfString | mfChecked
+	if hScale, _, _ := procCreatePopupMenu.Call(); hScale != 0 {
+		scaleFlags := func(target float64) uintptr {
+			if a.world.Scale > target-0.05 && a.world.Scale < target+0.05 {
+				return mfString | mfChecked
+			}
+			return mfString
 		}
-		return mfString
+		procAppendMenuW.Call(hScale, scaleFlags(0.85), cmdScale85, uintptr(unsafe.Pointer(utf16Ptr("작게 (85%)"))))
+		procAppendMenuW.Call(hScale, scaleFlags(1.00), cmdScale100, uintptr(unsafe.Pointer(utf16Ptr("보통 (100%)"))))
+		procAppendMenuW.Call(hScale, scaleFlags(1.25), cmdScale125, uintptr(unsafe.Pointer(utf16Ptr("크게 (125%)"))))
+		procAppendMenuW.Call(hScale, scaleFlags(1.50), cmdScale150, uintptr(unsafe.Pointer(utf16Ptr("아주 크게 (150%)"))))
+		if ok, _, _ := procAppendMenuW.Call(hMenu, mfPopup, hScale, uintptr(unsafe.Pointer(utf16Ptr("캐릭터 크기")))); ok == 0 {
+			procDestroyMenu.Call(hScale)
+		}
 	}
-	procAppendMenuW.Call(hScale, scaleFlags(0.85), cmdScale85, uintptr(unsafe.Pointer(utf16Ptr("작게 (85%)"))))
-	procAppendMenuW.Call(hScale, scaleFlags(1.00), cmdScale100, uintptr(unsafe.Pointer(utf16Ptr("보통 (100%)"))))
-	procAppendMenuW.Call(hScale, scaleFlags(1.25), cmdScale125, uintptr(unsafe.Pointer(utf16Ptr("크게 (125%)"))))
-	procAppendMenuW.Call(hScale, scaleFlags(1.50), cmdScale150, uintptr(unsafe.Pointer(utf16Ptr("아주 크게 (150%)"))))
-	procAppendMenuW.Call(hMenu, mfPopup, hScale, uintptr(unsafe.Pointer(utf16Ptr("캐릭터 크기"))))
 
 	roamFlag := uintptr(mfString)
 	if a.world.FreeRoam {
@@ -367,7 +385,7 @@ func (a *desktopApp) handleCommand(cmd int, targetPetID int) {
 	if cmd >= cmdSpawnBase && cmd < cmdSpawnBase+len(pet.Catalog) {
 		def := pet.Catalog[cmd-cmdSpawnBase]
 		// If summoned via right-clicking a pet, stack onto that pet or drop nearby!
-		a.world.SpawnWithClaw(def.ID, 0, 0)
+		a.world.SpawnWithClaw(def.ID, 0, targetPetID)
 		return
 	}
 	switch cmd {
@@ -511,6 +529,21 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case wmDisplayChange, wmSettingChange:
 		if app != nil {
+			workArea, screen := getWorkAndScreenRects()
+			app.world.SetWorkArea(workArea, screen)
+		}
+		return 0
+
+	case wmDPIChanged:
+		if app != nil {
+			newDPI := uint32(wParam & 0xFFFF)
+			if newDPI >= 72 && newDPI <= 480 {
+				dpiScale := float64(newDPI) / 96.0
+				if dpiScale < 0.75 {
+					dpiScale = 1.0
+				}
+				app.world.BaseSize = 132.0 * dpiScale
+			}
 			workArea, screen := getWorkAndScreenRects()
 			app.world.SetWorkArea(workArea, screen)
 		}

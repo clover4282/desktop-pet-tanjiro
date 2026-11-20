@@ -89,11 +89,11 @@ const (
 	dwmwaExtendedFrameBounds = 9
 	dwmwaCloaked             = 14
 
-	hwndTopmost    = ^uintptr(0) // (HWND)-1
-	hwndNoTopmost  = ^uintptr(1) // (HWND)-2
-	swpNoSize      = 0x0001
-	swpNoMove      = 0x0002
-	swpNoActivate  = 0x0010
+	hwndTopmost   = ^uintptr(0) // (HWND)-1
+	hwndNoTopmost = ^uintptr(1) // (HWND)-2
+	swpNoSize     = 0x0001
+	swpNoMove     = 0x0002
+	swpNoActivate = 0x0010
 
 	wmNull           = 0x0000
 	wmDestroy        = 0x0002
@@ -106,6 +106,7 @@ const (
 	wmLButtonUp      = 0x0202
 	wmRButtonUp      = 0x0205
 	wmCaptureChanged = 0x0215
+	wmDPIChanged     = 0x02E0
 	wmApp            = 0x8000
 	wmTrayIcon       = wmApp + 1
 
@@ -118,8 +119,8 @@ const (
 	spiGetWorkArea = 0x0030
 	smCXScreen     = 0
 	smCYScreen     = 1
+	smCXIcon       = 11
 
-	idcArrow   = 32512
 	idcSizeAll = 32646
 	idcHand    = 32649
 
@@ -129,14 +130,13 @@ const (
 	mfPopup     = 0x00000010
 	mfSeparator = 0x00000800
 
-	tpmRightButton  = 0x0002
-	tpmReturnCmd    = 0x0100
-	tpmNonotify     = 0x0080
-	tpmBottomAlign  = 0x0020
+	tpmRightButton = 0x0002
+	tpmReturnCmd   = 0x0100
+	tpmNonotify    = 0x0080
+	tpmBottomAlign = 0x0020
 
-	nimAdd    = 0x00000000
-	nimModify = 0x00000001
-	nimDelete = 0x00000002
+	nimAdd     = 0x00000000
+	nimDelete  = 0x00000002
 	nifMessage = 0x00000001
 	nifIcon    = 0x00000002
 	nifTip     = 0x00000004
@@ -304,7 +304,6 @@ type dibSurface struct {
 	memDC       uintptr
 	hBmp        uintptr
 	oldBmp      uintptr
-	bits        unsafe.Pointer
 	w, h        int
 	buf         []byte
 	shrinkTicks int
@@ -316,29 +315,46 @@ func newDIBSurface() *dibSurface {
 }
 
 func (s *dibSurface) ensureSize(needW, needH int) bool {
-	if needW <= 0 || needH <= 0 {
+	return s.ensureSizeInternal(needW, needH, false)
+}
+
+func (s *dibSurface) shrinkTo(needW, needH int) bool {
+	return s.ensureSizeInternal(needW, needH, true)
+}
+
+func (s *dibSurface) ensureSizeInternal(needW, needH int, forceShrink bool) bool {
+	if s.memDC == 0 || needW <= 0 || needH <= 0 {
 		return false
 	}
-	if s.hBmp != 0 && s.w >= needW && s.h >= needH {
-		// Reclaim oversized DIB memory if the active bounds stay much smaller for ~3 seconds (120 frames at 40 FPS).
-		curArea := s.w * s.h
-		needArea := needW * needH
-		if curArea > 384*384 && needArea*3 < curArea {
-			s.shrinkTicks++
-			if s.shrinkTicks < 120 {
-				return true
-			}
-			// Fall through to shrink down to needed size
-		} else {
-			s.shrinkTicks = 0
-			return true
-		}
-	}
-	s.shrinkTicks = 0
 	// Round up in 64px steps to minimize GDI reallocations
 	newW := ((needW + 63) / 64) * 64
 	newH := ((needH + 63) / 64) * 64
-	if s.hBmp != 0 && (needW > s.w || needH > s.h) {
+
+	if s.hBmp != 0 && s.w >= needW && s.h >= needH {
+		if forceShrink {
+			if s.w <= newW && s.h <= newH {
+				s.shrinkTicks = 0
+				return true
+			}
+			// Fall through to immediately shrink down to target size
+		} else {
+			// Reclaim oversized DIB memory if the active bounds stay much smaller for ~3 seconds (120 frames at 40 FPS).
+			curArea := s.w * s.h
+			needArea := needW * needH
+			if curArea > 384*384 && needArea*3 < curArea {
+				s.shrinkTicks++
+				if s.shrinkTicks < 120 {
+					return true
+				}
+				// Fall through to shrink down to needed size
+			} else {
+				s.shrinkTicks = 0
+				return true
+			}
+		}
+	}
+	s.shrinkTicks = 0
+	if !forceShrink && s.hBmp != 0 && (needW > s.w || needH > s.h) {
 		// When growing, don't shrink the other axis in the same step
 		if newW < s.w {
 			newW = s.w
@@ -366,6 +382,9 @@ func (s *dibSurface) ensureSize(needW, needH int) bool {
 		0,
 	)
 	if hBmp == 0 || bits == nil {
+		if hBmp != 0 {
+			procDeleteObject.Call(hBmp)
+		}
 		return false
 	}
 
@@ -375,7 +394,6 @@ func (s *dibSurface) ensureSize(needW, needH int) bool {
 	}
 	s.oldBmp, _, _ = procSelectObject.Call(s.memDC, hBmp)
 	s.hBmp = hBmp
-	s.bits = bits
 	s.w = newW
 	s.h = newH
 	s.buf = unsafe.Slice((*byte)(bits), newW*newH*4)
@@ -397,6 +415,9 @@ func (s *dibSurface) close() {
 
 // createIconFromSprite converts an NRGBA sprite into a crisp 32x32 Win32 HICON for the tray & window.
 func createIconFromSprite(src *image.NRGBA) uintptr {
+	if src == nil {
+		return 0
+	}
 	const iconSz = 32
 	var bi bitmapInfo
 	bi.BmiHeader.BiSize = uint32(unsafe.Sizeof(bi.BmiHeader))
@@ -462,7 +483,8 @@ func createIconFromSprite(src *image.NRGBA) uintptr {
 		}
 	}
 
-	hMask, _, _ := procCreateBitmap.Call(iconSz, iconSz, 1, 1, 0)
+	var maskBits [iconSz * iconSz / 8]byte // zeroed AND mask for 32-bit ARGB icon
+	hMask, _, _ := procCreateBitmap.Call(iconSz, iconSz, 1, 1, uintptr(unsafe.Pointer(&maskBits[0])))
 	if hMask == 0 {
 		return 0
 	}
@@ -576,6 +598,10 @@ func enumWindowsProc(hwnd, _ uintptr) uintptr {
 	// Keep maximized windows in Z-order as Occluding=true so hidden windows behind them are never climbed!
 	isMaximized := rect.Min.X <= enumWorkArea.Min.X+4 && rect.Max.X >= enumWorkArea.Max.X-4 &&
 		rect.Min.Y <= enumWorkArea.Min.Y+6 && rect.Max.Y >= enumWorkArea.Max.Y-6
+	if isMaximized && exStyle&wsExLayered != 0 {
+		// Skip full-screen layered overlays (HUDs/annotation tools) so they don't occlude real windows behind them.
+		return 1
+	}
 
 	enumCollected = append(enumCollected, pet.WindowRect{
 		ID:        hwnd,

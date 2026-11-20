@@ -34,9 +34,35 @@ func (w *World) RenderBounds() image.Rectangle {
 
 	for _, p := range w.Pets {
 		halfW := int(math.Ceil(size * 0.85))
-		h := int(math.Ceil(size * 1.35))
+		h := int(math.Ceil(size * 1.45))
 		cx, by := int(math.Round(p.X)), int(math.Round(p.Y))
 		expand(cx-halfW, by-h, cx+halfW, by+pad/2)
+		if sprite, scaleX, scaleY, drawX, drawY, angle := w.petDrawParams(p); sprite != nil && scaleX > 0 && scaleY > 0 {
+			hw := float64(sprite.W) * 0.5 * scaleX
+			sh := float64(sprite.H) * scaleY
+			if math.Abs(angle) < 1e-4 {
+				expand(
+					int(math.Floor(drawX-hw)),
+					int(math.Floor(drawY-sh)),
+					int(math.Ceil(drawX+hw)),
+					int(math.Ceil(drawY)),
+				)
+			} else {
+				cosA := math.Cos(angle)
+				sinA := math.Sin(angle)
+				corners := [4][2]float64{
+					{-hw, -sh},
+					{hw, -sh},
+					{-hw, 0},
+					{hw, 0},
+				}
+				for _, c := range corners {
+					rx := drawX + c[0]*cosA - c[1]*sinA
+					ry := drawY + c[0]*sinA + c[1]*cosA
+					expand(int(math.Floor(rx)), int(math.Floor(ry)), int(math.Ceil(rx)), int(math.Ceil(ry)))
+				}
+			}
+		}
 		if p.State == StateClawSpawn || p.State == StateClawDismiss {
 			clawR := int(math.Ceil(size * 0.75))
 			cy := int(math.Round(p.ClawY))
@@ -74,22 +100,31 @@ func (w *World) RenderBounds() image.Rectangle {
 
 // HitTest returns the ID of the topmost pet under (screenX, screenY), checking actual sprite alpha.
 func (w *World) HitTest(screenX, screenY float64) int {
+	maxReach := w.PetSize() * 1.65
 	for i := len(w.Pets) - 1; i >= 0; i-- {
 		p := w.Pets[i]
 		if p.State == StateClawSpawn || p.State == StateClawDismiss {
 			continue
 		}
+		if math.Abs(screenX-p.X) > maxReach || math.Abs(screenY-p.Y) > maxReach {
+			continue
+		}
 		sprite, scaleX, scaleY, drawX, drawY, angle := w.petDrawParams(p)
-		if sprite == nil {
+		if sprite == nil || scaleX <= 0 || scaleY <= 0 {
 			continue
 		}
 		// Inverse transform around bottom-center pivot (drawX, drawY)
 		dx := screenX - drawX
 		dy := screenY - drawY
-		cosA := math.Cos(-angle)
-		sinA := math.Sin(-angle)
-		lx := dx*cosA - dy*sinA
-		ly := dx*sinA + dy*cosA
+		var lx, ly float64
+		if math.Abs(angle) < 1e-4 {
+			lx, ly = dx, dy
+		} else {
+			cosA := math.Cos(-angle)
+			sinA := math.Sin(-angle)
+			lx = dx*cosA - dy*sinA
+			ly = dx*sinA + dy*cosA
+		}
 
 		sw := float64(sprite.W)
 		sh := float64(sprite.H)
@@ -109,6 +144,9 @@ func (w *World) HitTest(screenX, screenY float64) int {
 }
 
 func (w *World) petDrawParams(p *Pet) (sprite *PremulSprite, scaleX, scaleY, drawX, drawY, angle float64) {
+	if w.Bank == nil {
+		return nil, 1, 1, p.X, p.Y, 0
+	}
 	ss := w.Bank.ByID[p.CharID]
 	if ss == nil {
 		return nil, 1, 1, p.X, p.Y, 0
@@ -231,7 +269,10 @@ func (w *World) RenderBGRA(buf []byte, width, height, originX, originY int) {
 // RenderBGRAWithStride renders the visible world into a premultiplied BGRA buffer
 // with row stride strideBytes (useful for reused Win32 DIBSections).
 func (w *World) RenderBGRAWithStride(buf []byte, strideBytes, width, height, originX, originY int) {
-	if width <= 0 || height <= 0 {
+	if width <= 0 || height <= 0 || strideBytes < width*4 {
+		return
+	}
+	if len(buf) < (height-1)*strideBytes+width*4 {
 		return
 	}
 	// Clear only the active width x height region
@@ -330,6 +371,9 @@ func drawGroundShadowBGRA(dst []byte, stride, dw, dh int, p *Pet, petSize, ox, o
 // blitSpriteBGRA blits a premultiplied BGRA sprite onto a premultiplied BGRA buffer with bilinear filtering,
 // pivot at bottom-center (px, py).
 func blitSpriteBGRA(dst []byte, stride, dw, dh int, src *PremulSprite, px, py, scaleX, scaleY, angle float64, flipX bool) {
+	if src == nil || src.W <= 0 || src.H <= 0 || scaleX <= 0 || scaleY <= 0 || dw <= 0 || dh <= 0 {
+		return
+	}
 	sw, sh := src.W, src.H
 	fsw, fsh := float64(sw), float64(sh)
 	invScaleX := 1.0 / scaleX
@@ -746,14 +790,6 @@ func drawGroundEffectBGRA(dst []byte, stride, dw, dh int, fx *GroundEffect, ox, 
 		}
 	case EffectSnowCompass:
 		drawSnowCompassBGRA(dst, stride, dw, dh, px, py, rx, t*0.5, c)
-	case EffectStarBurst:
-		drawEllipseRingBGRA(dst, stride, dw, dh, px, py, rx, ry, thick*0.85, c)
-		for k := 0; k < 6; k++ {
-			a := float64(k)*math.Pi/3.0 + t*0.4
-			x0, y0 := px+math.Cos(a)*rx*0.45, py+math.Sin(a)*ry*0.45
-			x1, y1 := px+math.Cos(a)*rx*1.05, py+math.Sin(a)*ry*1.05
-			drawCapsuleBGRA(dst, stride, dw, dh, x0, y0, x1, y1, thick*0.4, c)
-		}
 	case EffectDustPuff:
 		for k := 0; k < 6; k++ {
 			a := float64(k) * math.Pi / 3.0

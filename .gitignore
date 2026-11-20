@@ -1,6 +1,8 @@
 .DS_Store
 *.log
 *.tmp
+*.exe
+/dist/
 /chibipet
 /spriteproc
 /mkicon

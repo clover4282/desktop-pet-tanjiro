@@ -91,9 +91,9 @@ type PremulSprite struct {
 }
 
 type SpriteSet struct {
-	Def    CharacterDef
-	Poses  [poseCount]*image.NRGBA
-	Premul [poseCount]*PremulSprite
+	Def       CharacterDef
+	IdleNRGBA *image.NRGBA
+	Premul    [poseCount]*PremulSprite
 }
 
 type SpriteBank struct {
@@ -120,7 +120,9 @@ func LoadSpriteBank() (*SpriteBank, error) {
 				return nil, fmt.Errorf("decode %s: %w", path, err)
 			}
 			nrgba := toNRGBA(img)
-			ss.Poses[i] = nrgba
+			if Pose(i) == PoseIdle {
+				ss.IdleNRGBA = nrgba
+			}
 			ss.Premul[i] = toPremulBGRA(nrgba)
 		}
 		bank.ByID[def.ID] = ss
@@ -130,12 +132,13 @@ func LoadSpriteBank() (*SpriteBank, error) {
 }
 
 func toPremulBGRA(src *image.NRGBA) *PremulSprite {
-	w := src.Bounds().Dx()
-	h := src.Bounds().Dy()
+	b := src.Bounds()
+	w := b.Dx()
+	h := b.Dy()
 	stride := w * 4
 	pix := make([]byte, stride*h)
 	for y := 0; y < h; y++ {
-		sRow := y * src.Stride
+		sRow := src.PixOffset(b.Min.X, b.Min.Y+y)
 		dRow := y * stride
 		for x := 0; x < w; x++ {
 			si := sRow + x*4

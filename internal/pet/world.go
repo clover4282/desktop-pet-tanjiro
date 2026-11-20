@@ -34,8 +34,7 @@ type WindowRect struct {
 type EffectKind int
 
 const (
-	EffectStarBurst EffectKind = iota
-	EffectMochiRing
+	EffectMochiRing EffectKind = iota
 	EffectFlameRing
 	EffectLightningRing
 	EffectDustPuff
@@ -71,8 +70,6 @@ type Pet struct {
 
 	// Character-specific falling state
 	FallTime     float64
-	FallHeight   float64
-	FallBounces  int
 	FallTrailAcc float64
 	FallZigDir   float64
 
@@ -81,21 +78,17 @@ type Pet struct {
 	RubActiveTimer float64 // >0 while actively being rubbed
 	RubAccum       float64 // accumulated cursor travel over pet to distinguish rub from casual pass
 	RubLastDirX    int     // -1, 0, +1 for direction reversal bonus
-	RubDirX        float64 // smoothed rub direction (-1..1) for squishy follow
 	RubParticleAcc float64
 
 	// Natural walk cycle state
-	TargetVX     float64
-	WalkPhase    float64
-	WalkStepSign float64
-	WalkDustAcc  float64
+	TargetVX  float64
+	WalkPhase float64
 
 	// Window climbing / parkour state
 	AttachedWinID uintptr // 0 = taskbar / screen edge, non-zero = HWND of tracked window
 	ClimbFaceDir  float64 // +1 = wall is to pet's right, -1 = wall is to pet's left
 	ClimbPhase    float64
 	ClimbGoalY    float64 // optional height to stop climbing and jump off
-	ClimbStepPrev float64 // previous sin(ClimbPhase) for hand-grip FX sync
 	MantleStartX  float64
 	MantleEndX    float64
 	MantleTopY    float64
@@ -138,7 +131,7 @@ type World struct {
 	WorkArea image.Rectangle // Primary monitor work area (MaxY = top of taskbar)
 	Screen   image.Rectangle // Full monitor rect (for bounds clipping)
 
-	BaseSize    float64 // Logical sprite size in pixels (e.g. 136 * dpiScale)
+	BaseSize    float64 // Logical sprite size in pixels (e.g. 132 * dpiScale)
 	Scale       float64 // User scale multiplier (0.85, 1.0, 1.25, 1.5)
 	FreeRoam    bool
 	WindowClimb bool
@@ -159,7 +152,6 @@ type World struct {
 	dragGrabOffY   float64
 	dragMoved      bool
 	lastMouseX     float64
-	lastMouseY     float64
 	hoverPetID     int
 	hoverLastX     float64
 	hoverLastY     float64
@@ -216,7 +208,23 @@ func (w *World) StartClipIntro() {
 }
 
 func (w *World) PetSize() float64 {
-	return w.BaseSize * w.Scale
+	scale := w.Scale
+	if scale <= 0 {
+		scale = 1.0
+	}
+	return w.BaseSize * scale
+}
+
+func (w *World) stackRoot(p *Pet) *Pet {
+	cur := p
+	for guard := 0; guard < 32 && cur != nil && cur.StackParentID != 0; guard++ {
+		parent := w.FindPet(cur.StackParentID)
+		if parent == nil {
+			break
+		}
+		cur = parent
+	}
+	return cur
 }
 
 func (w *World) SetWorkArea(workArea, screen image.Rectangle) {
@@ -226,17 +234,24 @@ func (w *World) SetWorkArea(workArea, screen image.Rectangle) {
 	newFloor := float64(w.WorkArea.Max.Y)
 	dy := newFloor - oldFloor
 	for _, p := range w.Pets {
-		if p.AttachedWinID == 0 && (p.State == StateIdle || p.State == StateWalk) {
+		switch {
+		case p.AttachedWinID == 0 && (p.State == StateIdle || p.State == StateWalk):
 			p.Y = newFloor
-		} else if p.State == StateStacked {
-			p.Y += dy
+		case p.State == StateStacked:
+			if root := w.stackRoot(p); root != nil && root.AttachedWinID == 0 {
+				p.Y += dy
+			}
+		case p.State == StateClawSpawn && p.TargetParent == 0:
+			p.TargetY = newFloor
 		}
-		w.clampPetX(p)
+		if p.State != StateClimbUp && p.State != StateMantle {
+			w.clampPetX(p)
+		}
 	}
 }
 
 // SetWindows updates the list of visible Windows app windows and keeps attached pets riding along
-// if a window moves, or gracefully falling if a window closes or minimizes!
+// if a window moves, or gracefully falling if a window closes, minimizes, or becomes maximized/occluding!
 func (w *World) SetWindows(wins []WindowRect) {
 	oldMap := make(map[uintptr]image.Rectangle, len(w.Windows))
 	for _, ow := range w.Windows {
@@ -244,18 +259,18 @@ func (w *World) SetWindows(wins []WindowRect) {
 	}
 	w.Windows = wins
 
-	newMap := make(map[uintptr]image.Rectangle, len(wins))
-	for _, nw := range wins {
-		newMap[nw.ID] = nw.Rect
+	newIdx := make(map[uintptr]int, len(wins))
+	for i, nw := range wins {
+		newIdx[nw.ID] = i
 	}
 
 	for _, p := range w.Pets {
 		if p.AttachedWinID == 0 {
 			continue
 		}
-		nr, ok := newMap[p.AttachedWinID]
-		if !ok {
-			// Window closed or minimized -> fall gracefully with character animation!
+		idx, ok := newIdx[p.AttachedWinID]
+		if !ok || wins[idx].Occluding {
+			// Window closed, minimized, or maximized/occluding -> fall gracefully with character animation!
 			p.AttachedWinID = 0
 			w.unstackChildren(p.ID)
 			if p.State != StateGrabbed && p.State != StateClawSpawn && p.State != StateClawDismiss {
@@ -263,27 +278,49 @@ func (w *World) SetWindows(wins []WindowRect) {
 			}
 			continue
 		}
+		nr := wins[idx].Rect
 		if or, had := oldMap[p.AttachedWinID]; had {
 			dx := float64(nr.Min.X - or.Min.X)
 			dy := float64(nr.Min.Y - or.Min.Y)
-			if p.State == StateClimbUp {
-				// Keep hugging exact updated left/right edge
-				size := w.PetSize()
+			size := w.PetSize()
+			margin := size * 0.30
+			switch p.State {
+			case StateClimbUp:
+				// Keep hugging exact updated left/right edge and clamp Y inside resized wall
 				if p.ClimbFaceDir > 0 {
 					p.X = float64(nr.Min.X) - size*0.24
 				} else {
 					p.X = float64(nr.Max.X) + size*0.24
 				}
 				p.Y += dy
-			} else if p.State == StateIdle || p.State == StateWalk || p.State == StateJumpPrep {
+				if p.Y < float64(nr.Min.Y) {
+					p.Y = float64(nr.Min.Y)
+				}
+				if p.Y > float64(nr.Max.Y) {
+					p.Y = float64(nr.Max.Y)
+				}
+			case StateMantle:
+				p.MantleStartX += dx
+				p.MantleEndX += dx
+				p.MantleTopY = float64(nr.Min.Y)
+				p.X += dx
+				p.Y += dy
+				lx := float64(nr.Min.X) + margin
+				rx := float64(nr.Max.X) - margin
+				if rx < lx {
+					p.MantleEndX = float64(nr.Min.X+nr.Max.X) * 0.5
+				} else {
+					p.MantleEndX = clampF(p.MantleEndX, lx, rx)
+				}
+			case StateIdle, StateWalk, StateJumpPrep:
 				p.X += dx
 				p.Y = float64(nr.Min.Y)
-				margin := w.PetSize() * 0.34
-				if p.X < float64(nr.Min.X)+margin {
-					p.X = float64(nr.Min.X) + margin
-				}
-				if p.X > float64(nr.Max.X)-margin {
-					p.X = float64(nr.Max.X) - margin
+				lx := float64(nr.Min.X) + margin
+				rx := float64(nr.Max.X) - margin
+				if rx < lx {
+					p.X = float64(nr.Min.X+nr.Max.X) * 0.5
+				} else {
+					p.X = clampF(p.X, lx, rx)
 				}
 			}
 		}
@@ -468,14 +505,22 @@ func (w *World) DismissPet(id int) {
 	if p == nil || p.State == StateClawDismiss {
 		return
 	}
+	if w.dragPetID == id {
+		w.dragPetID = 0
+		w.dragMoved = false
+	}
 	// Release any pets stacked on top of this pet
 	w.unstackChildren(id)
 	p.StackParentID = 0
+	p.AttachedWinID = 0
 	p.State = StateClawDismiss
 	p.ClawGrabbed = false
 	p.ClawOpen = 1.0
 	p.ClawY = float64(w.WorkArea.Min.Y) - w.PetSize()*0.6
 	p.ReactTimer = 0
+	p.RubActiveTimer = 0
+	p.RubMeter = 0
+	p.RubAccum = 0
 }
 
 func (w *World) UnstackAll() {
@@ -488,14 +533,20 @@ func (w *World) UnstackAll() {
 }
 
 func (w *World) ClearAll() {
+	w.dragPetID = 0
+	w.dragMoved = false
 	for _, p := range w.Pets {
 		if p.State != StateClawDismiss {
 			p.StackParentID = 0
+			p.AttachedWinID = 0
 			p.State = StateClawDismiss
 			p.ClawGrabbed = false
 			p.ClawOpen = 1.0
 			p.ClawY = float64(w.WorkArea.Min.Y) - w.PetSize()*0.6 - w.rng.Float64()*200
 			p.ReactTimer = 0
+			p.RubActiveTimer = 0
+			p.RubMeter = 0
+			p.RubAccum = 0
 		}
 	}
 }
@@ -604,7 +655,6 @@ func (w *World) MouseDown(screenX, screenY float64) int {
 	w.dragStartX = screenX
 	w.dragStartY = screenY
 	w.lastMouseX = screenX
-	w.lastMouseY = screenY
 	w.dragGrabOffX = p.X - screenX
 	w.dragGrabOffY = p.Y - screenY
 	w.dragMoved = false
@@ -629,6 +679,9 @@ func (w *World) MouseMove(screenX, screenY float64) {
 		p.AttachedWinID = 0
 		p.State = StateGrabbed
 		p.ReactTimer = 0
+		p.RubActiveTimer = 0
+		p.RubMeter = 0
+		p.RubAccum = 0
 		w.unstackChildren(p.ID)
 	}
 	if w.dragMoved {
@@ -643,7 +696,6 @@ func (w *World) MouseMove(screenX, screenY float64) {
 		w.clampPetX(p)
 	}
 	w.lastMouseX = screenX
-	w.lastMouseY = screenY
 }
 
 func (w *World) MouseUp(screenX, screenY float64) {
@@ -687,8 +739,6 @@ func (w *World) startFall(p *Pet, vx, vy float64) {
 	p.VX = vx
 	p.VY = vy
 	p.FallTime = 0
-	p.FallHeight = math.Max(0, float64(w.WorkArea.Max.Y)-p.Y)
-	p.FallBounces = 0
 	p.FallTrailAcc = 0
 	p.FallZigDir = 1
 	if w.rng.Float64() < 0.5 {
@@ -714,6 +764,9 @@ func (w *World) startFall(p *Pet, vx, vy float64) {
 
 // MouseHover handles cursor movement over pets when not dragging, enabling character-specific rubbing (문지르기)!
 func (w *World) MouseHover(screenX, screenY float64) {
+	if w.Scale <= 0 {
+		w.Scale = 1.0
+	}
 	if w.dragPetID != 0 {
 		w.hoverHasPrev = false
 		return
@@ -773,7 +826,6 @@ func (w *World) MouseHover(screenX, screenY float64) {
 	}
 	if dirX != 0 {
 		p.RubLastDirX = dirX
-		p.RubDirX = p.RubDirX*0.65 + float64(dirX)*0.35
 	}
 
 	p.RubAccum += dist * bonus
@@ -974,6 +1026,11 @@ func (w *World) clampPetX(p *Pet) {
 	half := w.PetSize() * 0.42
 	minX := float64(w.WorkArea.Min.X) + half
 	maxX := float64(w.WorkArea.Max.X) - half
+	if minX > maxX {
+		p.X = float64(w.WorkArea.Min.X+w.WorkArea.Max.X) * 0.5
+		p.VX = 0
+		return
+	}
 	if p.X < minX {
 		p.X = minX
 		if p.VX < 0 {
@@ -998,6 +1055,9 @@ func (w *World) Step(dt float64) {
 	if dt > 0.05 {
 		dt = 0.05
 	}
+	if w.Scale <= 0 {
+		w.Scale = 1.0
+	}
 	if w.hoverHasPrev {
 		w.hoverResetSec += dt
 		if w.hoverResetSec > 0.45 {
@@ -1020,9 +1080,11 @@ func (w *World) Step(dt float64) {
 	size := w.PetSize()
 	floorY := float64(w.WorkArea.Max.Y)
 
-	// Update pets (slice may remove dismissed pets)
-	kept := w.Pets[:0]
-	for _, p := range w.Pets {
+	// Iterate over a snapshot so attachStack->bringToFront cannot corrupt iteration or overwrite pets.
+	snapshot := make([]*Pet, len(w.Pets))
+	copy(snapshot, w.Pets)
+	var removedIDs []int
+	for _, p := range snapshot {
 		p.AnimTime += dt
 
 		// Spring-damper for juicy squash & stretch
@@ -1059,9 +1121,9 @@ func (w *World) Step(dt float64) {
 		remove := false
 		switch p.State {
 		case StateClawSpawn:
-			// Update target if aimed at a living parent pet
+			// Update target if aimed at a stackable, unoccupied parent pet
 			if p.TargetParent != 0 {
-				if parent := w.FindPet(p.TargetParent); parent != nil {
+				if parent := w.FindPet(p.TargetParent); isStackableHost(parent) && !w.hasStackChild(parent.ID) {
 					p.TargetX = parent.X
 					p.TargetY = w.HeadTopY(parent)
 				} else {
@@ -1085,14 +1147,17 @@ func (w *World) Step(dt float64) {
 					Open:     0.85,
 				})
 				if p.TargetParent != 0 {
-					if parent := w.FindPet(p.TargetParent); parent != nil {
+					if parent := w.FindPet(p.TargetParent); isStackableHost(parent) && !w.hasStackChild(parent.ID) {
 						w.attachStack(p, parent)
 						break
 					}
+					p.TargetParent = 0
 				}
 				// Check if we happened to land on someone's head
 				if host := w.findStackTarget(p, false); host != nil {
 					w.attachStack(p, host)
+				} else if p.Y < floorY-4 {
+					w.startFall(p, 0, 0)
 				} else {
 					p.State = StateIdle
 					p.Squash = 0.24
@@ -1140,7 +1205,7 @@ func (w *World) Step(dt float64) {
 			w.stepWalk(p, dt, floorY)
 
 		case StateClimbUp:
-			w.stepClimbUp(p, dt, floorY)
+			w.stepClimbUp(p, dt)
 
 		case StateMantle:
 			w.stepMantle(p, dt)
@@ -1195,11 +1260,26 @@ func (w *World) Step(dt float64) {
 			}
 		}
 
-		if !remove {
-			kept = append(kept, p)
+		if remove {
+			removedIDs = append(removedIDs, p.ID)
 		}
 	}
-	w.Pets = kept
+	if len(removedIDs) > 0 {
+		kept := w.Pets[:0]
+		for _, p := range w.Pets {
+			drop := false
+			for _, id := range removedIDs {
+				if p.ID == id {
+					drop = true
+					break
+				}
+			}
+			if !drop {
+				kept = append(kept, p)
+			}
+		}
+		w.Pets = kept
+	}
 
 	// Update detached propeller claws flying back up off screen
 	keptClaws := w.DetachedClaws[:0]
@@ -1258,7 +1338,6 @@ func (w *World) stepRubbing(p *Pet, dt float64) {
 	}
 	if p.RubActiveTimer <= 0 {
 		p.RubMeter = math.Max(0, p.RubMeter-0.55*dt)
-		p.RubDirX *= math.Max(0, 1-dt*8)
 		return
 	}
 
@@ -1566,6 +1645,7 @@ func (w *World) stepIdle(p *Pet, dt, floorY float64) {
 	surfY, minX, maxX, ok := w.surfaceBounds(p, floorY)
 	if !ok {
 		p.AttachedWinID = 0
+		w.unstackChildren(p.ID)
 		w.startFall(p, 0, 0)
 		return
 	}
@@ -1652,14 +1732,13 @@ func (w *World) startWalk(p *Pet, dir float64) {
 	p.TargetVX = dir * speed
 	p.FacingLeft = dir < 0
 	p.StateTimer = 1.8 + w.rng.Float64()*3.2
-	p.WalkStepSign = 1
-	p.WalkDustAcc = 0
 }
 
 func (w *World) stepWalk(p *Pet, dt, floorY float64) {
 	surfY, minX, maxX, ok := w.surfaceBounds(p, floorY)
 	if !ok {
 		p.AttachedWinID = 0
+		w.unstackChildren(p.ID)
 		w.startFall(p, 0, 0)
 		return
 	}
@@ -1781,30 +1860,38 @@ func (w *World) startClimbUp(p *Pet, winID uintptr, faceDir float64) {
 	if w.hasStackChild(p.ID) {
 		return // Never climb walls while someone is stacked on your head!
 	}
+	var targetWin WindowRect
+	if winID != 0 {
+		win, ok := w.findWindow(winID)
+		if !ok || win.Occluding {
+			return
+		}
+		targetWin = win
+	}
 	p.StackParentID = 0
 	p.AttachedWinID = winID
 	p.ClimbFaceDir = faceDir // +1 = wall to right, -1 = wall to left
 	p.FacingLeft = faceDir < 0
 	p.State = StateClimbUp
 	p.ClimbPhase = 0
-	p.ClimbStepPrev = 0
 	p.VX = 0
 	p.VY = 0
 	p.TargetVX = 0
 	p.ReactTimer = 0
+	p.RubActiveTimer = 0
+	p.RubMeter = 0
+	p.RubAccum = 0
 	p.Squash = 0.14
 
 	// Snap cleanly onto wall X
 	size := w.PetSize()
 	if winID != 0 {
-		if win, ok := w.findWindow(winID); ok {
-			if faceDir > 0 {
-				p.X = float64(win.Rect.Min.X) - size*0.24
-			} else {
-				p.X = float64(win.Rect.Max.X) + size*0.24
-			}
-			p.ClimbGoalY = float64(win.Rect.Min.Y)
+		if faceDir > 0 {
+			p.X = float64(targetWin.Rect.Min.X) - size*0.24
+		} else {
+			p.X = float64(targetWin.Rect.Max.X) + size*0.24
 		}
+		p.ClimbGoalY = float64(targetWin.Rect.Min.Y)
 	} else {
 		if faceDir < 0 {
 			p.X = float64(w.WorkArea.Min.X) + size*0.28
@@ -1821,9 +1908,10 @@ func (w *World) startClimbUp(p *Pet, winID uintptr, faceDir float64) {
 	}
 }
 
-func (w *World) stepClimbUp(p *Pet, dt, floorY float64) {
+func (w *World) stepClimbUp(p *Pet, dt float64) {
 	size := w.PetSize()
 	var topY float64
+	var attachedWin WindowRect
 	if p.AttachedWinID != 0 {
 		win, winIdx, ok := w.findWindowWithIndex(p.AttachedWinID)
 		if !ok || win.Occluding {
@@ -1831,6 +1919,7 @@ func (w *World) stepClimbUp(p *Pet, dt, floorY float64) {
 			w.startFall(p, 0, 0)
 			return
 		}
+		attachedWin = win
 		wallX := win.Rect.Min.X
 		if p.ClimbFaceDir > 0 {
 			p.X = float64(win.Rect.Min.X) - size*0.24
@@ -1839,7 +1928,9 @@ func (w *World) stepClimbUp(p *Pet, dt, floorY float64) {
 			p.X = float64(win.Rect.Max.X) + size*0.24
 		}
 		// If a foreground window now covers this wall edge, drop off cleanly instead of phasing through it!
-		if w.isPointOccluded(winIdx, wallX, int(p.Y-size*0.35)) {
+		inX := wallX + int(p.ClimbFaceDir*6)
+		probeY := int(p.Y - size*0.35)
+		if w.isPointOccluded(winIdx, wallX, probeY) || w.isPointOccluded(winIdx, inX, probeY) {
 			p.AttachedWinID = 0
 			w.startFall(p, 0, 0)
 			return
@@ -1892,15 +1983,14 @@ func (w *World) stepClimbUp(p *Pet, dt, floorY float64) {
 		p.Y = topY
 		if p.AttachedWinID != 0 {
 			// Smooth parabolic corner vault (StateMantle) onto the top of the window!
-			win, _ := w.findWindow(p.AttachedWinID)
-			endX := float64(win.Rect.Min.X) + size*0.38
+			endX := float64(attachedWin.Rect.Min.X) + size*0.38
 			if p.ClimbFaceDir < 0 {
-				endX = float64(win.Rect.Max.X) - size*0.38
+				endX = float64(attachedWin.Rect.Max.X) - size*0.38
 			}
 			p.State = StateMantle
 			p.MantleStartX = p.X
 			p.MantleEndX = endX
-			p.MantleTopY = float64(win.Rect.Min.Y)
+			p.MantleTopY = float64(attachedWin.Rect.Min.Y)
 			p.MantleT = 0
 			p.Squash = -0.18
 			w.spawnParticleCustom(p.X+p.ClimbFaceDir*size*0.2, p.Y-size*0.3, -p.ClimbFaceDir*30, -35, 0.48, 6.5, ParticleSparkle, color.NRGBA{255, 225, 100, 235})
@@ -1912,6 +2002,14 @@ func (w *World) stepClimbUp(p *Pet, dt, floorY float64) {
 }
 
 func (w *World) stepMantle(p *Pet, dt float64) {
+	if p.AttachedWinID != 0 {
+		win, winIdx, ok := w.findWindowWithIndex(p.AttachedWinID)
+		if !ok || win.Occluding || w.isPointOccluded(winIdx, int(p.MantleEndX), win.Rect.Min.Y+4) {
+			p.AttachedWinID = 0
+			w.startFall(p, 0, 0)
+			return
+		}
+	}
 	const dur = 0.26
 	p.MantleT += dt / dur
 	if p.MantleT >= 1.0 {
@@ -1940,7 +2038,6 @@ func (w *World) startJumpPrep(p *Pet, dirX float64) {
 			dirX = -1
 		}
 	}
-	w.unstackChildren(p.ID)
 	p.StackParentID = 0
 	p.State = StateJumpPrep
 	p.JumpDirX = dirX
@@ -1949,9 +2046,20 @@ func (w *World) startJumpPrep(p *Pet, dirX float64) {
 	p.VX = 0
 	p.TargetVX = 0
 	p.ReactTimer = 0
+	p.RubActiveTimer = 0
+	p.RubMeter = 0
+	p.RubAccum = 0
 }
 
 func (w *World) stepJumpPrep(p *Pet, dt float64) {
+	if p.AttachedWinID != 0 {
+		win, winIdx, ok := w.findWindowWithIndex(p.AttachedWinID)
+		if !ok || win.Occluding || w.isPointOccluded(winIdx, int(p.X), win.Rect.Min.Y+4) {
+			p.AttachedWinID = 0
+			w.startFall(p, 0, 0)
+			return
+		}
+	}
 	// Crouch down and lean outward toward the jump!
 	p.Squash = 0.28
 	p.Tilt = p.JumpDirX * 0.18
@@ -1986,6 +2094,7 @@ func (w *World) stepJumpArc(p *Pet, dt, floorY float64) {
 	if p.Y >= floorY {
 		p.Y = floorY
 		p.State = StateIdle
+		p.StateTimer = 2.0 + w.rng.Float64()*3.5
 		p.VX, p.VY, p.Tilt = 0, 0, 0
 		w.triggerCharacterLandingFX(p, false)
 	}
