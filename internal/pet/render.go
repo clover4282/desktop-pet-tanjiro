@@ -736,6 +736,8 @@ func drawRubAuraBGRA(dst []byte, stride, dw, dh int, p *Pet, petSize, ox, oy flo
 		col = color.NRGBA{255, 165, 195, clampByte(110 * strength)}
 	case "yakgwa_boy", "yakgwa_girl":
 		col = color.NRGBA{250, 185, 75, clampByte(125 * strength)}
+	case "mashimaro":
+		col = color.NRGBA{255, 105, 130, clampByte(115 * strength)}
 	default:
 		col = color.NRGBA{255, 220, 105, clampByte(115 * strength)}
 	}

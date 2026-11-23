@@ -877,6 +877,14 @@ func (w *World) applyRubImpulse(p *Pet, dx, dy float64) {
 		// Bouncy sweet honey-cookie wobble under your cursor!
 		p.Squash = clampF(p.Squash+0.11, -0.22, 0.30)
 		p.Tilt = clampF(p.Tilt+dir*0.14, -0.26, 0.26)
+	case "mashimaro":
+		// Deadpan unimpressed wiggle at first, then squishy marshmallow softness!
+		if p.RubMeter < 0.45 {
+			p.Tilt = clampF(p.Tilt-dir*0.08, -0.16, 0.16)
+		} else {
+			p.Squash = clampF(p.Squash+0.12, -0.22, 0.34)
+			p.Tilt = clampF(p.Tilt+dir*0.12, -0.22, 0.22)
+		}
 	}
 }
 
@@ -1384,6 +1392,14 @@ func (w *World) stepRubbing(p *Pet, dt float64) {
 		// Cheerful sweet cookie dance
 		p.Tilt += math.Sin(p.AnimTime*12) * 0.02
 		emitInterval = 0.12
+	case "mashimaro":
+		// Deadpan stare at first -> mischievous relaxed wiggle
+		if p.RubMeter < 0.45 {
+			emitInterval = 0.20
+		} else {
+			p.Tilt += math.Sin(p.AnimTime*10) * 0.02
+			emitInterval = 0.12
+		}
 	}
 
 	if p.RubParticleAcc < emitInterval {
@@ -1446,6 +1462,12 @@ func (w *World) stepRubbing(p *Pet, dt float64) {
 		w.spawnParticleCustom(px, py, vx, vy-12, 0.9, 8.5, ParticleSparkle, color.NRGBA{255, 200, 70, 255})
 	case "yakgwa_girl":
 		w.spawnParticleCustom(px, py, vx, vy-12, 0.95, 8.5, ParticleHeart, color.NRGBA{255, 115, 145, 255})
+	case "mashimaro":
+		if p.RubMeter < 0.45 {
+			w.spawnParticleCustom(px, py, vx*0.7, vy*0.5, 0.65, 6.5, ParticleSweat, color.NRGBA{140, 215, 255, 235})
+		} else {
+			w.spawnParticleCustom(px, py, vx, vy-15, 0.95, 8.5, ParticleHeart, color.NRGBA{255, 100, 125, 255})
+		}
 	}
 }
 
@@ -1575,6 +1597,17 @@ func (w *World) stepFall(p *Pet, dt, floorY float64) {
 			}
 		}
 
+	case "mashimaro":
+		// Deadpan calm marshmallow floaty fall + tiny sweat trail
+		gravity = 1320.0 * w.Scale
+		p.VY += gravity * dt
+		p.X += p.VX * dt
+		p.Tilt = math.Sin(p.FallTime*7.0) * 0.12
+		if p.FallTrailAcc >= 0.10 {
+			p.FallTrailAcc = 0
+			w.spawnParticleCustom(p.X+(w.rng.Float64()-0.5)*size*0.4, p.Y-size*0.6, (w.rng.Float64()-0.5)*40, -30, 0.55, 6.5, ParticleSweat, color.NRGBA{140, 215, 255, 235})
+		}
+
 	default:
 		p.VY += gravity * dt
 		p.X += p.VX * dt
@@ -1649,6 +1682,8 @@ func characterGait(charID string) walkGait {
 		return walkGait{speed: 80, stride: 34, hop: 7.0, waddle: 0.05, lean: 0.06}
 	case "yakgwa_boy", "yakgwa_girl":
 		return walkGait{speed: 68, stride: 28, hop: 8.5, waddle: 0.08, lean: 0.05}
+	case "mashimaro":
+		return walkGait{speed: 64, stride: 26, hop: 7.5, waddle: 0.085, lean: 0.03}
 	default:
 		return walkGait{speed: 62, stride: 28, hop: 6.5, waddle: 0.075, lean: 0.04}
 	}
@@ -2331,6 +2366,11 @@ func (w *World) triggerCharacterLandingFX(p *Pet, onHead bool) {
 		// Chewy golden-honey cookie bounce!
 		p.Squash = 0.36
 		w.addGroundEffect(p.X, y, size*0.72*scaleMul, 0.48, EffectMochiRing, color.NRGBA{245, 185, 75, 225})
+		w.spawnReactionParticles(p, 6)
+	case "mashimaro":
+		// Plump marshmallow bounce + plunger-pink shockwave!
+		p.Squash = 0.44
+		w.addGroundEffect(p.X, y, size*0.74*scaleMul, 0.48, EffectMochiRing, color.NRGBA{255, 95, 115, 225})
 		w.spawnReactionParticles(p, 6)
 	default:
 		p.Squash = 0.25

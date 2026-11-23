@@ -23,7 +23,9 @@ func main() {
 	posesFlag := flag.String("poses", "idle,grabbed,react", "comma-separated pose names left-to-right")
 	bgMode := flag.String("bg", "green", "chroma background color: green or magenta")
 	cleanTopArm := flag.Bool("clean-top-arm", false, "erase disembodied beige arm touching top center edge")
+	cleanTopString := flag.Bool("clean-top-string", false, "erase thin vertical string above pose 2 head/ears")
 	cleanVertLine := flag.Bool("clean-vert-line", false, "erase thin dark vertical wall line in pose 3")
+	noInteriorGreen := flag.Bool("no-interior-green", false, "skip interior green hole punch (preserves green costume details)")
 	copyPose := flag.String("copy-pose", "", "optional srcIdx:dstIdx (0-based) to replace a bad pose with another")
 	preview := flag.String("preview", "", "optional preview contact sheet path")
 	flag.Parse()
@@ -49,13 +51,42 @@ func main() {
 	if *bgMode == "magenta" {
 		clean = removeChromaMagenta(img)
 	} else {
-		clean = removeChromaGreen(img)
+		clean = removeChromaGreen(img, !*noInteriorGreen)
 	}
 	if *cleanVertLine {
 		eraseThinVerticalWallLine(clean)
 	}
 
 	crops := splitPoses(clean, len(poses))
+	if *cleanTopString && len(crops) >= 2 {
+		c := crops[1]
+		cw, ch := c.Bounds().Dx(), c.Bounds().Dy()
+		// Erase thin vertical hanging string pixels descending from the very top above ears
+		for y := 0; y < int(float64(ch)*0.22); y++ {
+			maxRun := 0
+			run := 0
+			for x := 0; x < cw; x++ {
+				if c.NRGBAAt(x, y).A >= 20 {
+					run++
+					if run > maxRun {
+						maxRun = run
+					}
+				} else {
+					run = 0
+				}
+			}
+			if maxRun == 0 {
+				continue
+			}
+			if maxRun > 9 {
+				break
+			}
+			for x := 0; x < cw; x++ {
+				c.SetNRGBA(x, y, color.NRGBA{0, 0, 0, 0})
+			}
+		}
+		crops[1] = cropTight(c, c.Bounds())
+	}
 	if *cleanTopArm && len(crops) >= 2 {
 		c := crops[1]
 		cw, ch := c.Bounds().Dx(), c.Bounds().Dy()
@@ -262,7 +293,7 @@ func savePNG(path string, img image.Image) error {
 	return enc.Encode(f, img)
 }
 
-func removeChromaGreen(src *image.NRGBA) *image.NRGBA {
+func removeChromaGreen(src *image.NRGBA, punchInterior bool) *image.NRGBA {
 	w, h := src.Bounds().Dx(), src.Bounds().Dy()
 	out := image.NewNRGBA(image.Rect(0, 0, w, h))
 	copy(out.Pix, src.Pix)
@@ -274,21 +305,23 @@ func removeChromaGreen(src *image.NRGBA) *image.NRGBA {
 		fr, fg, fb := float64(r), float64(g), float64(b)
 		excess := fg - math.Max(fr, fb)
 		dist := math.Sqrt((fr-bgR)*(fr-bgR) + (fg-bgG)*(fg-bgG) + (fb-bgB)*(fb-bgB))
-		return (dist < 65 && excess > 30) || (fg > 125 && excess > 45 && fr < 150 && fb < 150)
+		return (dist < 65 && excess > 30) || (fg > 85 && excess > 35 && fr < 110 && fb < 110)
 	}
 
 	floodBorder(out, bgMask, isBG)
 
-	// Interior pure chroma-green holes
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			idx := y*w + x
-			if bgMask[idx] {
-				continue
-			}
-			p := out.NRGBAAt(x, y)
-			if p.G > 165 && int(p.G)-int(maxU8(p.R, p.B)) > 75 && p.R < 120 && p.B < 120 {
-				bgMask[idx] = true
+	if punchInterior {
+		// Interior pure chroma-green holes
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				idx := y*w + x
+				if bgMask[idx] {
+					continue
+				}
+				p := out.NRGBAAt(x, y)
+				if p.G > 165 && int(p.G)-int(maxU8(p.R, p.B)) > 75 && p.R < 120 && p.B < 120 {
+					bgMask[idx] = true
+				}
 			}
 		}
 	}

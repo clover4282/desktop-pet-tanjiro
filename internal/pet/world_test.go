@@ -14,8 +14,8 @@ func TestLoadAndSimulateClipScenes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSpriteBank failed: %v", err)
 	}
-	if len(bank.List) != 8 {
-		t.Fatalf("expected 8 characters, got %d", len(bank.List))
+	if len(bank.List) != 9 {
+		t.Fatalf("expected 9 characters, got %d", len(bank.List))
 	}
 	for _, removed := range []string{"chiikawa", "usagi", "rakko"} {
 		if _, ok := bank.ByID[removed]; ok {
@@ -67,13 +67,13 @@ func TestLoadAndSimulateClipScenes(t *testing.T) {
 		t.Fatalf("expected duplicate tanjiro summon blocked, got len=%d", len(w.Pets))
 	}
 
-	// 5. Summon remaining characters -> total should be 8 (no duplicates)
+	// 5. Summon remaining characters -> total should be 9 (no duplicates)
 	w.SpawnAll()
-	if len(w.Pets) != 8 {
-		t.Fatalf("expected 8 unique pets after SpawnAll, got %d", len(w.Pets))
+	if len(w.Pets) != 9 {
+		t.Fatalf("expected 9 unique pets after SpawnAll, got %d", len(w.Pets))
 	}
 	if w.SpawnRandomWithClaw() != nil {
-		t.Fatalf("expected SpawnRandomWithClaw to return nil when all 8 are already out")
+		t.Fatalf("expected SpawnRandomWithClaw to return nil when all 9 are already out")
 	}
 
 	// 6. Drag & stack Akaza onto Kyojuro, then dismiss Kyojuro -> Akaza lands safely
@@ -113,7 +113,7 @@ func TestCharacterSpecificFallAndRubbing(t *testing.T) {
 	w.FreeRoam = false
 
 	for i, def := range Catalog {
-		x := 110.0 + float64(i)*150.0
+		x := 90.0 + float64(i)*135.0
 		p := w.newPet(def.ID, x, 190.0)
 		w.Pets = append(w.Pets, p)
 		w.startFall(p, 0, 0)
@@ -127,7 +127,7 @@ func TestCharacterSpecificFallAndRubbing(t *testing.T) {
 		}
 	}
 
-	// Test rubbing on all 8 characters
+	// Test rubbing on all 9 characters
 	for _, p := range w.Pets {
 		cy := p.Y - 68
 		w.MouseHover(p.X, cy)

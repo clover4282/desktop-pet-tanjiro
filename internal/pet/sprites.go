@@ -90,6 +90,11 @@ var Catalog = []CharacterDef{
 		ReactScale: 1.06, HeadTopFrac: 0.16,
 		ParticleKind: ParticleHeart, AccentColor: color.NRGBA{255, 110, 140, 255},
 	},
+	{
+		ID: "mashimaro", Name: "엽기토끼 (마시마로)", Group: "엽기토끼",
+		ReactScale: 1.07, HeadTopFrac: 0.25,
+		ParticleKind: ParticleSparkle, AccentColor: color.NRGBA{255, 85, 95, 255},
+	},
 }
 
 // PremulSprite stores a sprite pre-converted to premultiplied BGRA (matching Win32 DIB layout)
