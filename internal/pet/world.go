@@ -85,15 +85,15 @@ type Pet struct {
 	WalkPhase float64
 
 	// Window climbing / parkour state
-	AttachedWinID uintptr // 0 = taskbar / screen edge, non-zero = HWND of tracked window
-	ClimbFaceDir  float64 // +1 = wall is to pet's right, -1 = wall is to pet's left
-	ClimbPhase    float64
-	ClimbGoalY    float64 // optional height to stop climbing and jump off
-	MantleStartX  float64
-	MantleEndX    float64
-	MantleTopY    float64
-	MantleT       float64
-	JumpDirX      float64 // -1 or +1 launch direction
+	AttachedWinID   uintptr // 0 = taskbar / screen edge, non-zero = HWND of tracked window
+	ClimbFaceDir    float64 // +1 = wall is to pet's right, -1 = wall is to pet's left
+	ClimbPhase      float64
+	ClimbGoalY      float64 // optional height to stop climbing and jump off
+	MantleStartX    float64
+	MantleEndX      float64
+	MantleTopY      float64
+	MantleT         float64
+	JumpDirX        float64 // -1 or +1 launch direction
 	IgnoreWinID     uintptr // briefly ignore the window just jumped off
 	IgnoreWinTime   float64
 	IgnoreStackID   int // briefly ignore the pet whose head we just hopped off
@@ -873,6 +873,10 @@ func (w *World) applyRubImpulse(p *Pet, dx, dy float64) {
 			p.Squash = clampF(p.Squash-0.07, -0.20, 0.20)
 			p.Tilt = clampF(p.Tilt+dir*0.07, -0.15, 0.15)
 		}
+	case "yakgwa_boy", "yakgwa_girl":
+		// Bouncy sweet honey-cookie wobble under your cursor!
+		p.Squash = clampF(p.Squash+0.11, -0.22, 0.30)
+		p.Tilt = clampF(p.Tilt+dir*0.14, -0.26, 0.26)
 	}
 }
 
@@ -1376,6 +1380,10 @@ func (w *World) stepRubbing(p *Pet, dt float64) {
 		} else {
 			emitInterval = 0.12
 		}
+	case "yakgwa_boy", "yakgwa_girl":
+		// Cheerful sweet cookie dance
+		p.Tilt += math.Sin(p.AnimTime*12) * 0.02
+		emitInterval = 0.12
 	}
 
 	if p.RubParticleAcc < emitInterval {
@@ -1434,6 +1442,10 @@ func (w *World) stepRubbing(p *Pet, dt float64) {
 				w.addGroundEffect(p.X, p.Y-size*0.04, size*0.72, 0.55, EffectSnowCompass, color.NRGBA{110, 225, 255, 220})
 			}
 		}
+	case "yakgwa_boy":
+		w.spawnParticleCustom(px, py, vx, vy-12, 0.9, 8.5, ParticleSparkle, color.NRGBA{255, 200, 70, 255})
+	case "yakgwa_girl":
+		w.spawnParticleCustom(px, py, vx, vy-12, 0.95, 8.5, ParticleHeart, color.NRGBA{255, 115, 145, 255})
 	}
 }
 
@@ -1544,6 +1556,25 @@ func (w *World) stepFall(p *Pet, dt, floorY float64) {
 			w.spawnParticleCustom(p.X+(w.rng.Float64()-0.5)*size*0.5, p.Y-size*0.45, (w.rng.Float64()-0.5)*50, -65, 0.55, 8.0, ParticleSnowflake, color.NRGBA{110, 225, 255, 245})
 		}
 
+	case "yakgwa_boy", "yakgwa_girl":
+		// Playful honey-cookie tumble spin + sweet sparkle/heart trail!
+		gravity = 1480.0 * w.Scale
+		p.VY += gravity * dt
+		p.X += p.VX * dt
+		spinDir := 1.0
+		if p.VX < -15 {
+			spinDir = -1.0
+		}
+		p.Tilt += spinDir * 7.5 * dt
+		if p.FallTrailAcc >= 0.075 {
+			p.FallTrailAcc = 0
+			if p.CharID == "yakgwa_boy" {
+				w.spawnParticleCustom(p.X+(w.rng.Float64()-0.5)*size*0.4, p.Y-size*0.5, (w.rng.Float64()-0.5)*45, -40, 0.6, 7.5, ParticleSparkle, color.NRGBA{255, 200, 75, 250})
+			} else {
+				w.spawnParticleCustom(p.X+(w.rng.Float64()-0.5)*size*0.4, p.Y-size*0.5, (w.rng.Float64()-0.5)*45, -40, 0.6, 7.5, ParticleHeart, color.NRGBA{255, 115, 145, 250})
+			}
+		}
+
 	default:
 		p.VY += gravity * dt
 		p.X += p.VX * dt
@@ -1594,12 +1625,12 @@ func (w *World) stepFall(p *Pet, dt, floorY float64) {
 }
 
 type walkGait struct {
-	speed     float64 // base px/s at scale 1.0
-	stride    float64 // px per half-step cycle
-	hop       float64 // vertical step arc height
-	waddle    float64 // side-to-side roll radians
-	lean      float64 // slight forward lean radians
-	stepDust  bool
+	speed    float64 // base px/s at scale 1.0
+	stride   float64 // px per half-step cycle
+	hop      float64 // vertical step arc height
+	waddle   float64 // side-to-side roll radians
+	lean     float64 // slight forward lean radians
+	stepDust bool
 }
 
 func characterGait(charID string) walkGait {
@@ -1616,6 +1647,8 @@ func characterGait(charID string) walkGait {
 		return walkGait{speed: 88, stride: 30, hop: 10.5, waddle: 0.11, lean: 0.08, stepDust: true}
 	case "akaza":
 		return walkGait{speed: 80, stride: 34, hop: 7.0, waddle: 0.05, lean: 0.06}
+	case "yakgwa_boy", "yakgwa_girl":
+		return walkGait{speed: 68, stride: 28, hop: 8.5, waddle: 0.08, lean: 0.05}
 	default:
 		return walkGait{speed: 62, stride: 28, hop: 6.5, waddle: 0.075, lean: 0.04}
 	}
@@ -2294,6 +2327,11 @@ func (w *World) triggerCharacterLandingFX(p *Pet, onHead bool) {
 		p.Squash = 0.24
 		w.addGroundEffect(p.X, y, size*0.95*scaleMul, 0.68, EffectSnowCompass, color.NRGBA{100, 225, 255, 250})
 		w.spawnReactionParticles(p, 7)
+	case "yakgwa_boy", "yakgwa_girl":
+		// Chewy golden-honey cookie bounce!
+		p.Squash = 0.36
+		w.addGroundEffect(p.X, y, size*0.72*scaleMul, 0.48, EffectMochiRing, color.NRGBA{245, 185, 75, 225})
+		w.spawnReactionParticles(p, 6)
 	default:
 		p.Squash = 0.25
 	}

@@ -80,6 +80,16 @@ var Catalog = []CharacterDef{
 		ReactScale: 1.08, HeadTopFrac: 0.15,
 		ParticleKind: ParticleSnowflake, AccentColor: color.NRGBA{110, 220, 255, 255},
 	},
+	{
+		ID: "yakgwa_boy", Name: "약과군", Group: "약과",
+		ReactScale: 1.06, HeadTopFrac: 0.14,
+		ParticleKind: ParticleSparkle, AccentColor: color.NRGBA{255, 195, 70, 255},
+	},
+	{
+		ID: "yakgwa_girl", Name: "약과양", Group: "약과",
+		ReactScale: 1.06, HeadTopFrac: 0.16,
+		ParticleKind: ParticleHeart, AccentColor: color.NRGBA{255, 110, 140, 255},
+	},
 }
 
 // PremulSprite stores a sprite pre-converted to premultiplied BGRA (matching Win32 DIB layout)

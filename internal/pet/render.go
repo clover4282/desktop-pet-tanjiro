@@ -615,7 +615,7 @@ func drawPropellerClawBGRA(dst []byte, stride, dw, dh int, cx, cy, petSize, anim
 	drawCircleBGRA(dst, stride, dw, dh, cx, cy+6*s, 5.2*s, goldMid)
 
 	// 4. Spinning golden motion-blur arcs around the propeller blades (exact video look!)
-	propY := cy - 26 * s
+	propY := cy - 26*s
 	phase := animTime * 28.0
 	bladeLen := (34.0 + 10.0*math.Abs(math.Cos(phase))) * s
 	drawEllipseRingBGRA(dst, stride, dw, dh, cx, propY, 50*s, 11*s, 2.4*s, ringCol)
@@ -734,6 +734,8 @@ func drawRubAuraBGRA(dst []byte, stride, dw, dh int, p *Pet, petSize, ox, oy flo
 		}
 	case "manggom":
 		col = color.NRGBA{255, 165, 195, clampByte(110 * strength)}
+	case "yakgwa_boy", "yakgwa_girl":
+		col = color.NRGBA{250, 185, 75, clampByte(125 * strength)}
 	default:
 		col = color.NRGBA{255, 220, 105, clampByte(115 * strength)}
 	}
